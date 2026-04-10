@@ -19,22 +19,20 @@
     'use strict';
 
     class AppState {
-        constructor() {
-            this.wmeSDK = null;
-            this.importState = {
-                isActive: false,
-                isPaused: false,
-                selectedSegmentIds: [],
-                loadedAddresses: [],
-                selectedAddresses: new Map(),
-            };
-            this.config = {
-                apiBaseUrl: "https://wms.kbox.at",
-                searchRadius: 0.5,
-                autoFillDistance: 50,
-            };
-            this.listeners = new Map();
-        }
+        wmeSDK = null;
+        importState = {
+            isActive: false,
+            isPaused: false,
+            selectedSegmentIds: [],
+            loadedAddresses: [],
+            selectedAddresses: new Map(),
+        };
+        config = {
+            apiBaseUrl: "https://wms.kbox.at",
+            searchRadius: 0.5,
+            autoFillDistance: 50,
+        };
+        listeners = new Map();
         setWmeSDK(sdk) {
             this.wmeSDK = sdk;
         }
@@ -126,11 +124,9 @@
     const appState = new AppState();
 
     class AddressDataClient {
-        constructor() {
-            this.baseUrl = "https://wms.kbox.at";
-            this.apiPath = "/adr";
-            this.requestQueue = Promise.resolve();
-        }
+        baseUrl = "https://wms.kbox.at";
+        apiPath = "/adr";
+        requestQueue = Promise.resolve();
         async fetchAddressesByBoundingBox(left, bottom, right, top) {
             try {
                 console.log(`📍 Fetching addresses: bbox=[${left},${bottom},${right},${top}]`);
@@ -273,11 +269,9 @@
     }
 
     class MapRenderer {
-        constructor() {
-            this.wmeSDK = null;
-            this.layerName = "Quick PP Importer";
-            this.isLayerCreated = false;
-        }
+        wmeSDK = null;
+        layerName = "Quick PP Importer";
+        isLayerCreated = false;
         setWmeSDK(sdk) {
             this.wmeSDK = sdk;
             this.createLayer();
@@ -439,12 +433,10 @@
     const mapRenderer = new MapRenderer();
 
     class SegmentSelector {
-        constructor() {
-            this.wmeSDK = null;
-            this.selectedSegments = [];
-            this.selectedStreetNames = [];
-            this.selectedHouseNumbers = [];
-        }
+        wmeSDK = null;
+        selectedSegments = [];
+        selectedStreetNames = [];
+        selectedHouseNumbers = [];
         setWmeSDK(sdk) {
             this.wmeSDK = sdk;
             this.setupSelectionListener();
