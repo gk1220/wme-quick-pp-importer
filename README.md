@@ -1,155 +1,280 @@
-# WME SDK TypeScript Example
+# WME Quick PP Importer
 
-This project helps you **bootstrap a TypeScript-based WME script** using the WME SDK.
+Ein Tampermonkey-Userscript für Waze Map Editors, das **automatisch Adressen aus österreichischen Geodaten lädt** und diese mit Farbcodierung auf der Karte darstellt.
 
-It provides a clean project setup with build scripts, type checking, and release automation — so you can focus on writing your script!
+## Features
 
----
+✨ **Adress-Integration**
+- Lädt Adressen von der kbox.at API basierend auf Map-Extent
+- Web Mercator (EPSG:3857) Koordinaten-Konvertierung
+- Automatische Segmentauswahl erkennat Straße
 
-## Setup options
+🎨 **Intelligente Farbcodierung**
+- 🟢 **Grün**: Neue Adressen (keine RPP vorhanden)
+- 🟢 **Hellgrün**: Bestehende RPPs (House Numbers auf Segment)
+- 🔘 **Grau**: Andere Straßen (zur besseren Orientierung)
 
-You can use this project in two ways:
+🔍 **Straßen-Matching**
+- Exakte Namen-Abgleichung mit normalisierten Straßencodes
+- Fuzzy-Matching für ähnliche Straßennamen (Levenshtein-Distance)
+- Automatische Normalisierung (Straße → Str, Gasse → G, etc.)
 
-- 🟡 **Option 1: using DevContainers (recommended)** — no need to install anything globally
-- 🟡 **Option 2: manual local setup** — install Node.js and Rollup yourself
+🗺️ **Kartendarstellung**
+- WME SDK Layer-API mit GeoJSON-Features
+- Hausnummer als Feature-Label
+- Interaktive Marker mit Klick-Handler (vorbereitet)
 
-**Important:** You **MUST** enable "Allow access to file URLs" for Tampermonkey, as explained [here](https://www.tampermonkey.net/faq.php?locale=en#Q204). Without this, Tampermonkey cannot load your local files during development.
-
----
-
-## Option 1: Using DevContainers (recommended)
-
-If you are using [Visual Studio Code](https://code.visualstudio.com/) and the [DevContainers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers):
-
-1. Open this folder in VS Code
-2. When prompted, **reopen in Dev Container** (or run: `Dev Containers: Reopen in Container`)
-3. The container will automatically install all dependencies (`npm install`)
-4. You can now run:
-
-```bash
-npm run watch
-```
-
-No need to install Node.js, npm or Rollup globally — everything is handled inside the container.
+⚙️ **Technische Besonderheiten**
+- **Tampermonkey CSP-Bypass**: GM_xmlhttpRequest statt fetch
+- **Modular**: Event-gesteuerte Architektur
+- **TypeScript**: Vollständig type-safe mit WME SDK Typings
+- **Rollup Build**: Optimierte Single-File `.user.js` für Tampermonkey
 
 ---
 
-## Option 2: Manual local setup
+## Installation
 
-If you prefer to run the project directly on your machine:
+### Für Benutzer
 
-### Required once
+1. Tampermonkey Browser-Extension installieren
+2. Zu [dieser Seite](about:blank) navigieren (später: Userscript-Host setzen)
+3. Release-Datei `releases/release-1.0.0.user.js` installieren
 
-* Install [npm](https://docs.npmjs.com/cli) and [Node.js](https://nodejs.org)
-* Allow local file access for the Tampermonkey extension, as explained [here](https://www.tampermonkey.net/faq.php?locale=en#Q204)
-* Install [Rollup](https://rollupjs.org) globally:
+### Für Entwickler
 
+#### Mit DevContainer (empfohlen)
 ```bash
-npm install --global rollup
+# VS Code: Dev Containers: Reopen in Container
+npm run watch   # Automatische Neukompilierung
 ```
 
-(This tool bundles your script for use in Tampermonkey.)
-
-* (Optional) Install Git to manage file versions
-
----
-
-## Getting started
-
-1. Download this repository (as a zip) or clone it via git:
-
-```bash
-git clone https://github.com/bedo2991/wme-typescript.git
-```
-
-2. Initialize your own git repo if needed:
-
-```bash
-git init
-```
-
-3. Update the details in:
-
-* `header.js` and `header-dev.js` → update author, script name, etc.
-* `main.user.ts` → set your script ID and name
-
-4. Install dependencies:
-
+#### Manuell
 ```bash
 npm install
+npm run watch   # Oder: npm run build
 ```
 
 ---
 
-## Coding
+## Verwendung
 
-* Open the project in an IDE (e.g. [VS Code](https://code.visualstudio.com/))
-* You will get type checking and autocomplete thanks to the WME SDK typings.
-* The `.ts` file containing your script (`main.user.ts`) needs to be translated to javascript in order to be used by Tampermonkey.
-* ⚠️ **Warning**: the content of the .out folder is generated, you should never edit anything in here.
-* During development, run:
+1. **WME öffnen** unter waze.com
+2. **Quick PP Importer aktivieren** über die Sidebar (Tab "🏠 Quick PP")
+3. **Straßen-Segment klicken** → Adressen werden automatisch geladen
+4. **Farbcodierung nutzen**:
+   - Grün: Neue Adressen hier einplanen
+   - Hellgrün: RPP schon vorhanden, überprüften vorhandene
 
-```bash
-npm run watch
+---
+
+## Architektur
+
+```
+src/
+├── main.user.ts           # Einstiegspunkt & SDK Orchestrierung
+├── core/
+│   ├── initialization.ts   # UI Sidebar & Keyboard Shortcutseach
+│   └── state.ts            # Globaler State mit Event System
+├── data/
+│   └── api.ts              # kbox.at API Client (GM_xmlhttpRequest)
+├── logic/
+│   └── segment-selector.ts # Segment-Auswahl & Adress-Filterung
+├── map/
+│   └── renderer.ts         # WME SDK Layer-Rendering
+└── utils/
+    └── geo.ts              # Geo-Utilities (Distanzberechnung)
 ```
 
-This will continuously compile `.ts` to `.js`.
-
-When ready to release:
-
-```bash
-npm run release
+**Event-Flow:**
+```
+Segment-Auswahl
+  ↓
+Segment-Geometrie → Map-Extent
+  ↓
+WGS84 → Web Mercator
+  ↓
+kbox.at API POST /adr
+  ↓
+HouseNumber-Check per WME SDK
+  ↓
+Straßen-Matching & Fuzzy-Match
+  ↓
+Farbcodierung (grün/hellgrün/grau)
+  ↓
+WME SDK Layer rendern
 ```
 
 ---
 
-## Prepare for a release
+## API-Integration
 
-1. Update the version number in `package.json`
-2. Run:
+### kbox.at Endpoint
 
-```bash
-npm run release
+**Basis-URL:** `https://wms.kbox.at/adr`
+
+**Methode:** `POST`
+
+**Body:**
+```json
+{
+  "x1": 1822706,  // Min Longitude (Web Mercator)
+  "y1": 6141470,  // Min Latitude (Web Mercator)
+  "x2": 1823282,  // Max Longitude (Web Mercator)
+  "y2": 6141926   // Max Latitude (Web Mercator)
+}
 ```
 
-A file will be created in the `releases/` folder with the version in its name.
+**Response:**
+```json
+[
+  {
+    "lon": 1822977.03,           // Web Mercator X
+    "lat": 6141708.61,           // Web Mercator Y
+    "hausnummerzahl1": "10",     // House Number
+    "strassenname": "Bäckerstraße",
+    "strassennr": 900334         // Internal street ID
+  },
+  // ... mehr Adressen
+]
+```
 
 ---
 
-## Scripts explained
+## Keyboard Shortcuts
 
-You can see all available scripts in `package.json`:
-
-* `compile`: compiles your script once — usually not needed manually
-* `watch`: continuously compiles when code changes — use this when developing
-* `concat`: combines your `header.js` with compiled `.out/main.user.js`
-* `build`: compile + concat
-* `release`: updates version in `header.js` and builds release file
+| Taste | Aktion |
+|-------|--------|
+| `P`   | Import Mode aktivieren/deaktivieren |
+| `O`   | Pause (bei aktivem Import) |
+| `Esc` | Alle Marker löschen |
 
 ---
 
-## Switching between production and beta typings
+## Debug-Commands
 
-1. Uninstall current typings:
+In der Browser-Console verfügbar via `testQuickPP.*`:
 
-```bash
-npm uninstall wme-sdk-typings
+```javascript
+// API testen
+testQuickPP.testAPI()                // Echte kbox.at API
+testQuickPP.testRender()             // Rendering mit Mock-Daten
+testQuickPP.testAPIWithMock()        // API mit Mock-Fallback
+
+// State & Debugging
+testQuickPP.showState()              // Aktuellen State anzeigen
+testQuickPP.countMarkers()           // Marker-Anzahl
+testQuickPP.showSegments()           // Segment-Info
+
+// Layer-Verwaltung
+testQuickPP.updatePositions()        // Layer neu rendern
+testQuickPP.loadAddresses()          // Adressen für Segmente laden
+testQuickPP.clear()                  // Alle Marker löschen
 ```
-
-2. Install desired version:
-
-**Production:**
-
-```bash
-npm install --save-dev https://web-assets.waze.com/wme_sdk_docs/production/latest/wme-sdk-typings.tgz
-```
-
-**Beta:**
-
-```bash
-npm install --save-dev https://web-assets.waze.com/wme_sdk_docs/beta/latest/wme-sdk-typings.tgz
-```
-
-Full WME SDK typings documentation [here](https://web-assets.waze.com/wme_sdk_docs/production/latest/index.html#md:typescript-type-definitions).
 
 ---
+
+## Konfiguration
+
+siehe [src/core/state.ts](src/core/state.ts):
+
+```typescript
+private config: ScriptConfig = {
+    apiBaseUrl: "https://wms.kbox.at",
+    searchRadius: 0.5,              // km (Padding um Segmente)
+    autoFillDistance: 50,            // Meter
+};
+```
+
+---
+
+## Build-System
+
+```bash
+npm run compile      # TypeScript → JavaScript (Rollup)
+npm run concat       # Header + Code → .user.js
+npm run build        # compile + concat
+npm run watch        # Automatisches Rebuild on save
+```
+
+**Output:** `releases/release-{version}.user.js`
+
+---
+
+## Abhängigkeiten
+
+| Paket | Version | Zweck |
+|-------|---------|-------|
+| `wme-sdk-typings` | ^0.48.10 | WME SDK Type Definitions |
+| `rollup` | ^4.0.0 | Bundler |
+| `@rollup/plugin-typescript` | ^11.x | TypeScript Support |
+| `typescript` | ^5.6.3 | Language |
+
+---
+
+## Bekannte Limitierungen
+
+- ⚠️ Adressen werden nur für Map-Extent geladen (nicht für einzelne Segmente)
+- ⚠️ RPP-Creator noch nicht implementiert
+- ⚠️ Nur Österreich (AT) unterstützt
+
+---
+
+## Roadmap
+
+- [ ] RPP-Creator (Maus-Klick → Neue HouseNumber erstellen)
+- [ ] Multi-Country Support (DE, CH, HU)
+- [ ] Address-Duplicate Detection
+- [ ] Batch-Import Mode
+- [ ] Settings UI erweitern
+
+---
+
+## Development
+
+### Neuen Feature hinzufügen
+
+1. **Neue Datei erstellen** in `src/{modul}/`
+2. **In `main.user.ts` integrieren** oder via Event-System
+3. **Build testen:** `npm run build`
+4. **In Tampermonkey laden:** `file:///path/to/releases/release-*.user.js`
+5. **Commiten:** `git add . && git commit -m "feat: ..."`
+
+### Debugging
+
+```typescript
+// In Dateien
+console.log(`🔍 Debug Info:`, data);
+console.error(`❌ Error:`, error);
+
+// Browser-Console
+testQuickPP.showState()
+testQuickPP.showSegments()
+```
+
+---
+
+## Troubleshooting
+
+**Marker nicht sichtbar?**
+- Prüfe: Sidebar visible (Tab "🏠 Quick PP")
+- Prüfe: Import Mode aktiv (P-Taste)
+- Prüfe: Segment ausgewählt
+
+**API-Fehler 404?**
+- Prüfe: Header.js `@connect wms.kbox.at` gesetzt
+- Prüfe: `src/core/state.ts` apiBaseUrl korrekt
+- Prüfe: POST Body mit Web-Mercator Koordinaten
+
+**Console zeigt Fehler?**
+- Browser F12 öffnen
+- Prüfe: Callstack im Copilot-Chat teilen
+
+---
+
+## Lizenz
+
+Siehe [LICENSE](LICENSE)
+
+---
+
+**Fragen?** Prüfe die Test-Commands oder öffne ein Issue! 🚀
