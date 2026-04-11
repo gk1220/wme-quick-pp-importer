@@ -6,8 +6,8 @@
 // @author      Gerhard (g1220k)
 // @homepageURL https://github.com/gk1220/wme-quick-pp-importer
 // @supportURL  https://github.com/gk1220/wme-quick-pp-importer/issues
-// @updateURL	https://github.com/gk1220/wme-quick-pp-importer/raw/main/WME_Quick_PP_Importer.user.js
-// @downloadURL https://github.com/gk1220/wme-quick-pp-importer/raw/main/WME_Quick_PP_Importer.user.js
+// @updateURL   https://update.greasyfork.org/scripts/573546/WME%20Quick%20PP%20Importer.meta.js
+// @downloadURL https://update.greasyfork.org/scripts/573546/WME%20Quick%20PP%20Importer.user.js
 // @match       https://www.waze.com/editor*
 // @match       https://beta.waze.com/editor*
 // @match       https://www.waze.com/*/editor*
