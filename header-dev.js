@@ -13,6 +13,7 @@
 // @exclude     https://www.waze.com/user/editor*
 // @exclude     https://beta.waze.com/user/editor*
 // @connect     wms.kbox.at
+// @license     GPL-3.0
 // @grant       GM_xmlhttpRequest
 // @grant       unsafeWindow
 

@@ -278,7 +278,15 @@ testQuickPP.testAPI()
 
 ## Lizenz
 
-Siehe [LICENSE](LICENSE)
+Dieses Skript steht unter der **GNU General Public License v3.0**. Siehe [LICENSE](LICENSE).
+
+### Quellen / Attributions
+
+Dieses Skript enthält Code, der von folgenden Projekten abgeleitet wurde:
+
+- **WME Quick HN Importer** von Tom 'Glodenox' Puttemans — [GitHub](https://github.com/Glodenox/wme-quick-hn-importer) — GPL-2.0
+- **WME Quick HN Importer AT Reloaded** von Ari Wazer (basierend auf Arbeit von Gerhard) — [Greasy Fork](https://greasyfork.org/en/scripts/551280-wme-quick-hn-importer-at-reloaded) — GPL-2.0
+- **WME Place Interface Enhancements** von JustinS83 — [GitHub](https://github.com/WazeDev/WME-Place-Interface-Enhancements) — GPL-3.0
 
 ---
 
