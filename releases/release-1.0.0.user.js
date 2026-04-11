@@ -635,72 +635,62 @@
                 const placeLon = position?.lon ?? address.longitude;
                 const placeLat = position?.lat ?? address.latitude;
                 debug(`🏠 Creating RPP: ${address.streetName} ${address.houseNumber}`, position ? `at (${placeLon.toFixed(6)}, ${placeLat.toFixed(6)})` : '');
-                if (this.wmeSDK) {
-                    try {
-                        const geometry = { type: 'Point', coordinates: [placeLon, placeLat] };
-                        const newPlaceId = this.wmeSDK.DataModel.Venues.addVenue({ category: 'RESIDENTIAL', geometry }).toString();
-                        debug(`✅ Created place via SDK: id=${newPlaceId}`);
-                        try {
-                            this.wmeSDK.DataModel.Venues.replaceNavigationPoints({
-                                venueId: newPlaceId,
-                                navigationPoints: [{ isEntry: true, isPrimary: true, point: geometry }]
-                            });
-                            debug(`🔁 Navigation point set for venue ${newPlaceId}`);
-                        }
-                        catch (navErr) {
-                            console.warn(`⚠️ Failed to set navigation points for ${newPlaceId}:`, navErr);
-                        }
-                        let streetFound = false;
-                        try {
-                            let streetId = undefined;
-                            const closestStreetId = this.findClosestSegmentStreetId(placeLon, placeLat, address.streetName);
-                            if (closestStreetId != null) {
-                                streetId = closestStreetId;
-                                const allStreets = this.wmeSDK.DataModel.Streets.getAll();
-                                const matchedStreet = allStreets.find(s => s.id === closestStreetId);
-                                const matchedName = matchedStreet?.name?.trim().toLowerCase();
-                                const targetName = address.streetName?.trim().toLowerCase();
-                                streetFound = !!(matchedName && targetName && matchedName === targetName);
-                                debug(`🛣️ Street: streetId=${streetId}, name="${matchedStreet?.name}", matched=${streetFound}`);
-                            }
-                            if (address.houseNumber || streetId) {
-                                this.wmeSDK.DataModel.Venues.updateAddress({
-                                    venueId: newPlaceId,
-                                    houseNumber: address.houseNumber || '',
-                                    ...(streetId ? { streetId } : {})
-                                });
-                                debug(`📝 Address set for venue ${newPlaceId} (streetFound=${streetFound})`);
-                            }
-                        }
-                        catch (addrErr) {
-                            console.warn(`⚠️ Failed to update address for ${newPlaceId}:`, addrErr);
-                        }
-                        try {
-                            this.wmeSDK.Editing.setSelection({ selection: { objectType: 'venue', ids: [newPlaceId] } });
-                            debug(`🔎 Selected new venue ${newPlaceId}`);
-                        }
-                        catch (selErr) {
-                            console.warn(`⚠️ Failed to select new venue ${newPlaceId}:`, selErr);
-                        }
-                        if (!streetFound) {
-                            debug(`📋 Street not resolved for "${address.streetName}" — opening address editor`);
-                            setTimeout(() => this.openAddressEditor(), 50);
-                        }
-                        else {
-                            debug(`✅ Street resolved for "${address.streetName}" — address complete`);
-                        }
-                        return;
+                if (!this.wmeSDK) {
+                    console.error('❌ WME SDK not initialized');
+                    return;
+                }
+                const geometry = { type: 'Point', coordinates: [placeLon, placeLat] };
+                const newPlaceId = this.wmeSDK.DataModel.Venues.addVenue({ category: 'RESIDENTIAL', geometry }).toString();
+                debug(`✅ Created place via SDK: id=${newPlaceId}`);
+                try {
+                    this.wmeSDK.DataModel.Venues.replaceNavigationPoints({
+                        venueId: newPlaceId,
+                        navigationPoints: [{ isEntry: true, isPrimary: true, point: geometry }]
+                    });
+                    debug(`🔁 Navigation point set for venue ${newPlaceId}`);
+                }
+                catch (navErr) {
+                    console.warn(`⚠️ Failed to set navigation points for ${newPlaceId}:`, navErr);
+                }
+                let streetFound = false;
+                try {
+                    let streetId = undefined;
+                    const closestStreetId = this.findClosestSegmentStreetId(placeLon, placeLat, address.streetName);
+                    if (closestStreetId != null) {
+                        streetId = closestStreetId;
+                        const allStreets = this.wmeSDK.DataModel.Streets.getAll();
+                        const matchedStreet = allStreets.find(s => s.id === closestStreetId);
+                        const matchedName = matchedStreet?.name?.trim().toLowerCase();
+                        const targetName = address.streetName?.trim().toLowerCase();
+                        streetFound = !!(matchedName && targetName && matchedName === targetName);
+                        debug(`🛣️ Street: streetId=${streetId}, name="${matchedStreet?.name}", matched=${streetFound}`);
                     }
-                    catch (sdkErr) {
-                        console.error('❌ SDK-based place creation failed:', sdkErr);
+                    if (address.houseNumber || streetId) {
+                        this.wmeSDK.DataModel.Venues.updateAddress({
+                            venueId: newPlaceId,
+                            houseNumber: address.houseNumber || '',
+                            ...(streetId ? { streetId } : {})
+                        });
+                        debug(`📝 Address set for venue ${newPlaceId} (streetFound=${streetFound})`);
                     }
+                }
+                catch (addrErr) {
+                    console.warn(`⚠️ Failed to update address for ${newPlaceId}:`, addrErr);
+                }
+                try {
+                    this.wmeSDK.Editing.setSelection({ selection: { objectType: 'venue', ids: [newPlaceId] } });
+                    debug(`🔎 Selected new venue ${newPlaceId}`);
+                }
+                catch (selErr) {
+                    console.warn(`⚠️ Failed to select new venue ${newPlaceId}:`, selErr);
+                }
+                if (!streetFound) {
+                    debug(`📋 Street not resolved for "${address.streetName}" — opening address editor`);
+                    setTimeout(() => this.openAddressEditor(), 50);
                 }
                 else {
-                    console.warn('⚠️ WME SDK not initialized; falling back to UI simulation');
+                    debug(`✅ Street resolved for "${address.streetName}" — address complete`);
                 }
-                await this.activatePlacePointTool(address);
-                await this.fillPlacePointData(address);
-                debug(`✅ RPP creation initiated for: ${address.streetName} ${address.houseNumber}`);
             }
             catch (error) {
                 console.error(`❌ Error creating RPP:`, error);
@@ -803,138 +793,6 @@
             else if (tries < 1000) {
                 setTimeout(() => this.openAddressEditor(tries + 1), 200);
             }
-        }
-        async activatePlacePointTool(address) {
-            const placeButton = this.findPlacePointButton();
-            if (!placeButton) {
-                console.warn(`⚠️ Place Point button not found`);
-                return;
-            }
-            placeButton.click();
-            await this.sleep(200);
-            this.simulateMapClick(address.latitude, address.longitude);
-        }
-        findPlacePointButton() {
-            const selectors = [
-                '[data-testid="add-place"]',
-                '.add-place',
-                'wz-button:has(.w-icon-place)',
-                '[aria-label*="place" i]',
-                '[title*="place" i]'
-            ];
-            for (const selector of selectors) {
-                const el = document.querySelector(selector);
-                if (el && this.isVisible(el))
-                    return el;
-            }
-            return null;
-        }
-        simulateMapClick(lat, lon) {
-            if (!this.wmeSDK)
-                return;
-            try {
-                const unsafeWindow = window.unsafeWindow || window;
-                if (!unsafeWindow.W?.map?.getPixelFromLonLat) {
-                    console.warn(`⚠️ WME map API not available for pixel conversion`);
-                    return;
-                }
-                const geo = new unsafeWindow.OpenLayers.LonLat(lon, lat);
-                const pixel = unsafeWindow.W.map.getPixelFromLonLat(geo);
-                if (!pixel)
-                    return;
-                const mapContainer = document.querySelector('.olMapViewport') ||
-                    document.querySelector('#map') ||
-                    document.querySelector('.wme-map-container');
-                if (!mapContainer)
-                    return;
-                const rect = mapContainer.getBoundingClientRect();
-                const clientX = rect.left + pixel.x;
-                const clientY = rect.top + pixel.y;
-                const clickEvent = new MouseEvent('click', {
-                    bubbles: true,
-                    cancelable: true,
-                    clientX,
-                    clientY,
-                    button: 0
-                });
-                mapContainer.dispatchEvent(clickEvent);
-                debug(`🖱️ Simulated click at pixel: ${pixel.x}, ${pixel.y}`);
-            }
-            catch (error) {
-                console.error(`❌ Error simulating map click:`, error);
-            }
-        }
-        async fillPlacePointData(address) {
-            await this.sleep(500);
-            try {
-                const editorPanel = this.findPlacePointEditor();
-                if (!editorPanel) {
-                    console.warn(`⚠️ Place Point editor not found`);
-                    return;
-                }
-                this.fillAddressFields(editorPanel, address);
-                console.log(`📝 Filled place point data: ${address.streetName} ${address.houseNumber}, ${address.city}`);
-            }
-            catch (error) {
-                console.error(`❌ Error filling place point data:`, error);
-            }
-        }
-        findPlacePointEditor() {
-            const selectors = [
-                'div.place-point.is-active',
-                '#edit-panel',
-                '[data-testid="edit-panel"]',
-                '.place-editor',
-                '.venue-editor'
-            ];
-            for (const selector of selectors) {
-                const el = document.querySelector(selector);
-                if (el && this.isVisible(el))
-                    return el;
-            }
-            return null;
-        }
-        fillAddressFields(editorPanel, address) {
-            const streetInput = editorPanel.querySelector('input[name="street"]') ||
-                editorPanel.querySelector('[data-testid="street-input"]') ||
-                editorPanel.querySelector('input[placeholder*="street" i]');
-            if (streetInput && streetInput instanceof HTMLInputElement) {
-                this.setInputValue(streetInput, address.streetName);
-            }
-            const houseNumberInput = editorPanel.querySelector('input[name="houseNumber"]') ||
-                editorPanel.querySelector('[data-testid="house-number-input"]') ||
-                editorPanel.querySelector('input[placeholder*="number" i]');
-            if (houseNumberInput && houseNumberInput instanceof HTMLInputElement) {
-                this.setInputValue(houseNumberInput, address.houseNumber);
-            }
-            const cityInput = editorPanel.querySelector('input[name="city"]') ||
-                editorPanel.querySelector('[data-testid="city-input"]') ||
-                editorPanel.querySelector('input[placeholder*="city" i]');
-            if (cityInput && cityInput instanceof HTMLInputElement) {
-                this.setInputValue(cityInput, address.city);
-            }
-            console.log(`📝 Filled address fields: ${address.streetName}, ${address.houseNumber}, ${address.city}`);
-        }
-        setInputValue(input, value) {
-            const win = input.ownerDocument.defaultView || window;
-            const desc = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value');
-            const nativeSetter = desc && desc.set;
-            if (nativeSetter) {
-                nativeSetter.call(input, value);
-                input.dispatchEvent(new win.Event('input', { bubbles: true }));
-                input.dispatchEvent(new win.Event('change', { bubbles: true }));
-            }
-            else {
-                input.value = value;
-            }
-            input.focus();
-            input.blur();
-        }
-        isVisible(el) {
-            if (!el || !el.getBoundingClientRect)
-                return false;
-            const r = el.getBoundingClientRect();
-            return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
         }
         sleep(ms) {
             return new Promise(resolve => setTimeout(resolve, ms));

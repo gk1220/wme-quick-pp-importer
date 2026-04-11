@@ -278,91 +278,75 @@ class MapRenderer {
             const placeLat = position?.lat ?? address.latitude;
             debug(`🏠 Creating RPP: ${address.streetName} ${address.houseNumber}`, position ? `at (${placeLon.toFixed(6)}, ${placeLat.toFixed(6)})` : '');
 
-            // Prefer SDK-based creation: more reliable than DOM/button simulation.
-            if (this.wmeSDK) {
-                try {
-                    const geometry = { type: 'Point', coordinates: [placeLon, placeLat] } as any;
-
-                    // Create a new residential place (RPP) via SDK
-                    const newPlaceId = this.wmeSDK.DataModel.Venues.addVenue({ category: 'RESIDENTIAL', geometry }).toString();
-                    debug(`✅ Created place via SDK: id=${newPlaceId}`);
-
-                    // Set navigation point for RPP (entry/primary)
-                    try {
-                        this.wmeSDK.DataModel.Venues.replaceNavigationPoints({
-                            venueId: newPlaceId,
-                            navigationPoints: [{ isEntry: true, isPrimary: true, point: geometry }]
-                        } as any);
-                        debug(`🔁 Navigation point set for venue ${newPlaceId}`);
-                    } catch (navErr) {
-                        console.warn(`⚠️ Failed to set navigation points for ${newPlaceId}:`, navErr);
-                    }
-
-                    // Find street from closest map segment — mirrors the old script's
-                    // WazeWrap.Geometry.findClosestSegment approach.
-                    // Use click position so the street comes from where the RPP actually is.
-                    let streetFound = false;
-                    try {
-                        let streetId: number | undefined = undefined;
-                        const closestStreetId = this.findClosestSegmentStreetId(placeLon, placeLat, address.streetName);
-                        if (closestStreetId != null) {
-                            streetId = closestStreetId;
-                            // Only consider the street "found" when we matched by name.
-                            // The fallback (geometry-only) means the name wasn't in the model
-                            // so we still open the editor for the user to verify.
-                            const allStreets = this.wmeSDK!.DataModel.Streets.getAll() as Array<{ id: number; name: string | null }>;
-                            const matchedStreet = allStreets.find(s => s.id === closestStreetId);
-                            const matchedName = matchedStreet?.name?.trim().toLowerCase();
-                            const targetName = address.streetName?.trim().toLowerCase();
-                            streetFound = !!(matchedName && targetName && matchedName === targetName);
-                            debug(`🛣️ Street: streetId=${streetId}, name="${matchedStreet?.name}", matched=${streetFound}`);
-                        }
-
-                        if (address.houseNumber || streetId) {
-                            this.wmeSDK.DataModel.Venues.updateAddress({
-                                venueId: newPlaceId,
-                                houseNumber: address.houseNumber || '',
-                                ...(streetId ? { streetId } : {})
-                            } as any);
-                            debug(`📝 Address set for venue ${newPlaceId} (streetFound=${streetFound})`);
-                        }
-                    } catch (addrErr) {
-                        console.warn(`⚠️ Failed to update address for ${newPlaceId}:`, addrErr);
-                    }
-
-                    // Select the newly created place to open editor panel
-                    try {
-                        this.wmeSDK.Editing.setSelection({ selection: { objectType: 'venue', ids: [newPlaceId] } });
-                        debug(`🔎 Selected new venue ${newPlaceId}`);
-                    } catch (selErr) {
-                        console.warn(`⚠️ Failed to select new venue ${newPlaceId}:`, selErr);
-                    }
-
-                    // Only open the address editor when the street could not be resolved —
-                    // matching the old script's "ohne" logic: skip editor when address is complete.
-                    if (!streetFound) {
-                        debug(`📋 Street not resolved for "${address.streetName}" — opening address editor`);
-                        setTimeout(() => this.openAddressEditor(), 50);
-                    } else {
-                        debug(`✅ Street resolved for "${address.streetName}" — address complete`);
-                    }
-
-                    return;
-                } catch (sdkErr) {
-                    console.error('❌ SDK-based place creation failed:', sdkErr);
-                    // fall through to UI fallback below
-                }
-            } else {
-                console.warn('⚠️ WME SDK not initialized; falling back to UI simulation');
+            if (!this.wmeSDK) {
+                console.error('❌ WME SDK not initialized');
+                return;
             }
 
-            // Fallback: WME Place Point Tool aktivieren und Position setzen via UI (legacy)
-            await this.activatePlacePointTool(address);
+            const geometry = { type: 'Point', coordinates: [placeLon, placeLat] } as any;
 
-            // Address-Daten in das Place Point Formular eintragen
-            await this.fillPlacePointData(address);
+            // Create a new residential place (RPP) via SDK
+            const newPlaceId = this.wmeSDK.DataModel.Venues.addVenue({ category: 'RESIDENTIAL', geometry }).toString();
+            debug(`✅ Created place via SDK: id=${newPlaceId}`);
 
-            debug(`✅ RPP creation initiated for: ${address.streetName} ${address.houseNumber}`);
+            // Set navigation point for RPP (entry/primary)
+            try {
+                this.wmeSDK.DataModel.Venues.replaceNavigationPoints({
+                    venueId: newPlaceId,
+                    navigationPoints: [{ isEntry: true, isPrimary: true, point: geometry }]
+                } as any);
+                debug(`🔁 Navigation point set for venue ${newPlaceId}`);
+            } catch (navErr) {
+                console.warn(`⚠️ Failed to set navigation points for ${newPlaceId}:`, navErr);
+            }
+
+            // Find street from closest map segment.
+            // Use click position so the street comes from where the RPP actually is.
+            let streetFound = false;
+            try {
+                let streetId: number | undefined = undefined;
+                const closestStreetId = this.findClosestSegmentStreetId(placeLon, placeLat, address.streetName);
+                if (closestStreetId != null) {
+                    streetId = closestStreetId;
+                    // Only consider the street "found" when we matched by name.
+                    // The fallback (geometry-only) means the name wasn't in the model
+                    // so we still open the editor for the user to verify.
+                    const allStreets = this.wmeSDK!.DataModel.Streets.getAll() as Array<{ id: number; name: string | null }>;
+                    const matchedStreet = allStreets.find(s => s.id === closestStreetId);
+                    const matchedName = matchedStreet?.name?.trim().toLowerCase();
+                    const targetName = address.streetName?.trim().toLowerCase();
+                    streetFound = !!(matchedName && targetName && matchedName === targetName);
+                    debug(`🛣️ Street: streetId=${streetId}, name="${matchedStreet?.name}", matched=${streetFound}`);
+                }
+
+                if (address.houseNumber || streetId) {
+                    this.wmeSDK.DataModel.Venues.updateAddress({
+                        venueId: newPlaceId,
+                        houseNumber: address.houseNumber || '',
+                        ...(streetId ? { streetId } : {})
+                    } as any);
+                    debug(`📝 Address set for venue ${newPlaceId} (streetFound=${streetFound})`);
+                }
+            } catch (addrErr) {
+                console.warn(`⚠️ Failed to update address for ${newPlaceId}:`, addrErr);
+            }
+
+            // Select the newly created place to open editor panel
+            try {
+                this.wmeSDK.Editing.setSelection({ selection: { objectType: 'venue', ids: [newPlaceId] } });
+                debug(`🔎 Selected new venue ${newPlaceId}`);
+            } catch (selErr) {
+                console.warn(`⚠️ Failed to select new venue ${newPlaceId}:`, selErr);
+            }
+
+            // Only open the address editor when the street could not be resolved —
+            // skip editor when address is complete.
+            if (!streetFound) {
+                debug(`📋 Street not resolved for "${address.streetName}" — opening address editor`);
+                setTimeout(() => this.openAddressEditor(), 50);
+            } else {
+                debug(`✅ Street resolved for "${address.streetName}" — address complete`);
+            }
         } catch (error) {
             console.error(`❌ Error creating RPP:`, error);
         }
@@ -504,201 +488,6 @@ class MapRenderer {
         } else if (tries < 1000) {
             setTimeout(() => this.openAddressEditor(tries + 1), 200);
         }
-    }
-
-    /**
-     * Place Point Tool aktivieren und an Address-Position setzen
-     */
-    private async activatePlacePointTool(address: Address): Promise<void> {
-        // Place Point Tool Button finden (ähnlich wie HN Importer)
-        const placeButton = this.findPlacePointButton();
-        if (!placeButton) {
-            console.warn(`⚠️ Place Point button not found`);
-            return;
-        }
-
-        // Place Point Tool aktivieren
-        placeButton.click();
-
-        // Kurz warten für UI-Update
-        await this.sleep(200);
-
-        // An Address-Position klicken (simuliert Mausklick)
-        this.simulateMapClick(address.latitude, address.longitude);
-    }
-
-    /**
-     * Place Point Button im WME UI finden
-     */
-    private findPlacePointButton(): HTMLElement | null {
-        // Verschiedene Selektoren für den Place Point Button
-        const selectors = [
-            '[data-testid="add-place"]',
-            '.add-place',
-            'wz-button:has(.w-icon-place)',
-            '[aria-label*="place" i]',
-            '[title*="place" i]'
-        ];
-
-        for (const selector of selectors) {
-            const el = document.querySelector(selector) as HTMLElement;
-            if (el && this.isVisible(el)) return el;
-        }
-
-        return null;
-    }
-
-    /**
-     * Simulierten Mausklick an Koordinaten ausführen
-     */
-    private simulateMapClick(lat: number, lon: number): void {
-        if (!this.wmeSDK) return;
-
-        try {
-            // Verwende WME.map.getPixelFromLonLat wie im HN Importer
-            const unsafeWindow = (window as any).unsafeWindow || window;
-            if (!unsafeWindow.W?.map?.getPixelFromLonLat) {
-                console.warn(`⚠️ WME map API not available for pixel conversion`);
-                return;
-            }
-
-            const geo = new unsafeWindow.OpenLayers.LonLat(lon, lat);
-            const pixel = unsafeWindow.W.map.getPixelFromLonLat(geo);
-            if (!pixel) return;
-
-            // Map Container finden
-            const mapContainer = document.querySelector('.olMapViewport') ||
-                               document.querySelector('#map') ||
-                               document.querySelector('.wme-map-container');
-
-            if (!mapContainer) return;
-
-            const rect = mapContainer.getBoundingClientRect();
-            const clientX = rect.left + pixel.x;
-            const clientY = rect.top + pixel.y;
-
-            // Mausklick simulieren
-            const clickEvent = new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                clientX,
-                clientY,
-                button: 0
-            });
-
-            mapContainer.dispatchEvent(clickEvent);
-            debug(`🖱️ Simulated click at pixel: ${pixel.x}, ${pixel.y}`);
-        } catch (error) {
-            console.error(`❌ Error simulating map click:`, error);
-        }
-    }
-
-    /**
-     * Address-Daten in Place Point Formular eintragen
-     */
-    private async fillPlacePointData(address: Address): Promise<void> {
-        // Kurz warten bis Place Point Editor geladen ist
-        await this.sleep(500);
-
-        try {
-            // Place Point Editor Panel finden
-            const editorPanel = this.findPlacePointEditor();
-            if (!editorPanel) {
-                console.warn(`⚠️ Place Point editor not found`);
-                return;
-            }
-
-            // Address-Felder finden und ausfüllen
-            this.fillAddressFields(editorPanel, address);
-
-            // Optional: Automatisch speichern (kann konfiguriert werden)
-            // await this.savePlacePoint(editorPanel);
-
-            console.log(`📝 Filled place point data: ${address.streetName} ${address.houseNumber}, ${address.city}`);
-        } catch (error) {
-            console.error(`❌ Error filling place point data:`, error);
-        }
-    }
-
-    /**
-     * Place Point Editor Panel finden
-     */
-    private findPlacePointEditor(): HTMLElement | null {
-        const selectors = [
-            'div.place-point.is-active',
-            '#edit-panel',
-            '[data-testid="edit-panel"]',
-            '.place-editor',
-            '.venue-editor'
-        ];
-
-        for (const selector of selectors) {
-            const el = document.querySelector(selector) as HTMLElement;
-            if (el && this.isVisible(el)) return el;
-        }
-
-        return null;
-    }
-
-    /**
-     * Address-Felder im Editor ausfüllen
-     */
-    private fillAddressFields(editorPanel: HTMLElement, address: Address): void {
-        // Straßenname
-        const streetInput = editorPanel.querySelector('input[name="street"]') ||
-                           editorPanel.querySelector('[data-testid="street-input"]') ||
-                           editorPanel.querySelector('input[placeholder*="street" i]');
-        if (streetInput && streetInput instanceof HTMLInputElement) {
-            this.setInputValue(streetInput, address.streetName);
-        }
-
-        // Hausnummer
-        const houseNumberInput = editorPanel.querySelector('input[name="houseNumber"]') ||
-                                editorPanel.querySelector('[data-testid="house-number-input"]') ||
-                                editorPanel.querySelector('input[placeholder*="number" i]');
-        if (houseNumberInput && houseNumberInput instanceof HTMLInputElement) {
-            this.setInputValue(houseNumberInput, address.houseNumber);
-        }
-
-        // Stadt
-        const cityInput = editorPanel.querySelector('input[name="city"]') ||
-                         editorPanel.querySelector('[data-testid="city-input"]') ||
-                         editorPanel.querySelector('input[placeholder*="city" i]');
-        if (cityInput && cityInput instanceof HTMLInputElement) {
-            this.setInputValue(cityInput, address.city);
-        }
-
-        console.log(`📝 Filled address fields: ${address.streetName}, ${address.houseNumber}, ${address.city}`);
-    }
-
-    /**
-     * React-kompatible Input-Value setzen (wie HN Importer)
-     */
-    private setInputValue(input: HTMLInputElement, value: string): void {
-        const win = input.ownerDocument.defaultView || window;
-        const desc = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value');
-        const nativeSetter = desc && desc.set;
-
-        if (nativeSetter) {
-            nativeSetter.call(input, value);
-            input.dispatchEvent(new win.Event('input', { bubbles: true }));
-            input.dispatchEvent(new win.Event('change', { bubbles: true }));
-        } else {
-            input.value = value;
-        }
-
-        // Focus und Blur für React-Updates
-        input.focus();
-        input.blur();
-    }
-
-    /**
-     * Element Sichtbarkeit prüfen
-     */
-    private isVisible(el: HTMLElement): boolean {
-        if (!el || !el.getBoundingClientRect) return false;
-        const r = el.getBoundingClientRect();
-        return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
     }
 
     /**
