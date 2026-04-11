@@ -1,5 +1,5 @@
 {
-  "version": "2026.04.11.00",
+  "version": "2026.04.11.01",
   "name": "WME Quick PP Importer",
   "devDependencies": {
     "@rollup/plugin-typescript": "^12.1.0",
