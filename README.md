@@ -1,6 +1,112 @@
 # WME Quick PP Importer
 
-Ein Tampermonkey-Userscript für Waze Map Editors, das **automatisch Adressen aus österreichischen Geodaten lädt** und diese mit Farbcodierung auf der Karte darstellt.
+Ein Tampermonkey-Userscript für Waze Map Editors, das **Residential Place Points (RPPs) aus österreichischen Adressdaten** importiert.
+
+Adressen werden von der [kbox.at](https://wms.kbox.at) API geladen und als farbige Marker auf der Karte dargestellt. Ein Klick auf einen Marker erstellt automatisch einen RPP an der exakten Klickposition.
+
+---
+
+## Features
+
+🗺️ **Adress-Marker auf der Karte**
+- Lädt Adressen aus dem Bereich der aktuellen Kartenansicht
+- Farbcodierung zeigt sofort welche Adressen noch fehlen:
+  - 🟢 **Grün**: Adresse noch kein RPP vorhanden → anlegen
+  - 🟢 **Hellgrün**: RPP bereits in WME vorhanden → überspringen
+  - 🔘 **Grau**: Andere Straße (nur zur Orientierung)
+
+🏠 **RPP-Erstellung per Klick**
+- Klick auf einen grünen Marker → RPP wird an der Klickposition erstellt
+- Straße wird automatisch über das nächste geladene Segment aufgelöst
+- Hausnummer wird direkt gesetzt; Adresseditor öffnet nur wenn Straße nicht aufgelöst werden kann
+- Unterstützt österreichische L- und B-Straßen (Alternativer Straßenname)
+
+⌨️ **Tastenkürzel** (erscheinen in WME unter „Tastaturkürzel")
+- **P** — Adressen laden und Import-Modus starten (Segment muss vorher selektiert sein)
+- **P** (nochmals) — Import stoppen und Marker entfernen
+- **Esc** — Import pausieren (Marker bleiben auf der Karte)
+- **O** — Import fortsetzen nach Pause
+
+💾 **Tile-basiertes Caching**
+- Adressdaten werden in 750 m × 750 m Kacheln gecacht (7 Tage TTL, max. 300 Tiles)
+- Reduziert API-Aufrufe deutlich
+
+---
+
+## Installation
+
+### Produktiv (Release-Datei)
+
+1. [Tampermonkey](https://www.tampermonkey.net/) installieren
+2. Datei `releases/release-1.0.0.user.js` in Tampermonkey importieren
+
+### Entwicklung (Hot-Reload)
+
+```bash
+# Abhängigkeiten installieren
+npm install
+
+# Kontinuierliche Neukompilierung
+npm run watch
+
+# Einmaliger Build
+npm run build
+```
+
+Dann `header-dev.js` als Tampermonkey-Skript einrichten (Anweisungen in der Datei).
+
+---
+
+## Verwendung
+
+1. **WME öffnen** unter waze.com
+2. **Straßen-Segment selektieren**
+3. **P drücken** → Adress-Marker erscheinen auf der Karte
+4. **Auf grüne Marker klicken** → RPP wird erstellt
+   - RPP erscheint an der Klickposition
+   - Straße und Hausnummer werden automatisch gesetzt
+   - Wenn die Straße nicht aufgelöst wird: Adresseditor öffnet sich
+5. **Esc** zum Pausieren, **O** zum Fortsetzen, **P** zum Stoppen
+
+**Sidebar-Tab „🏠 Quick PP"** zeigt den aktuellen Status und enthält einen **Debug-Modus** für ausführlichere Console-Ausgaben.
+
+---
+
+## Console-Befehle (Browser DevTools)
+
+```javascript
+testQuickPP.testAPI()         // API-Aufruf für aktuelle Kartenansicht
+testQuickPP.showState()       // Aktuellen Script-State ausgeben
+testQuickPP.clearCache()      // Adress-Cache leeren
+testQuickPP.loadAddresses()   // Adressen für selektierte Segmente laden
+testQuickPP.countMarkers()    // Anzahl der Marker ausgeben
+testQuickPP.updatePositions() // Layer neu zeichnen
+```
+
+---
+
+## Architektur
+
+```
+src/
+├── main.user.ts               # Einstiegspunkt & SDK-Initialisierung
+├── core/
+│   ├── initialization.ts      # Sidebar-UI & Tastenkürzel
+│   └── state.ts               # Globaler State + Event-System + debug()
+├── data/
+│   └── api.ts                 # kbox.at API-Client + Tile-Cache
+├── logic/
+│   └── segment-selector.ts    # Segment-Auswahl & Adress-Filterung
+├── map/
+│   └── renderer.ts            # WME Layer-Rendering & RPP-Erstellung
+└── utils/
+    └── geo.ts                 # Geo-Hilfsfunktionen
+```
+
+**Build:** `rollup` kompiliert TypeScript → `.out/main.user.js` → konkateniert mit `header.js` → `releases/release-1.0.0.user.js`
+
+**API:** `POST https://wms.kbox.at/adr` mit Web-Mercator-Bounding-Box, gibt Adressen mit `strassenname`, `hausnummerzahl1`, `gemeinde` und Web-Mercator-Koordinaten zurück.
+
 
 ## Features
 
@@ -14,6 +120,17 @@ Ein Tampermonkey-Userscript für Waze Map Editors, das **automatisch Adressen au
 - 🟢 **Hellgrün**: Bestehende RPPs (House Numbers auf Segment)
 - 🔘 **Grau**: Andere Straßen (zur besseren Orientierung)
 
+🏠 **RPP-Erzeugung**
+- Ein-Klick RPP-Erstellung durch Klick auf Address-Marker
+- Automatische Ausfüllung von Straße, Hausnummer und Stadt
+- Simuliert WME Place Point Tool Interaktion
+
+💾 **Tile-basiertes Caching**
+- 750m × 750m Tiles für effiziente Cache-Nutzung
+- 7 Tage TTL mit LRU-Eviction (max. 300 Tiles)
+- Reduziert API-Aufrufe und verbessert Performance
+- Cache-leeren über Debug-Command verfügbar
+
 🔍 **Straßen-Matching**
 - Exakte Namen-Abgleichung mit normalisierten Straßencodes
 - Fuzzy-Matching für ähnliche Straßennamen (Levenshtein-Distance)
@@ -22,7 +139,7 @@ Ein Tampermonkey-Userscript für Waze Map Editors, das **automatisch Adressen au
 🗺️ **Kartendarstellung**
 - WME SDK Layer-API mit GeoJSON-Features
 - Hausnummer als Feature-Label
-- Interaktive Marker mit Klick-Handler (vorbereitet)
+- Interaktive Marker mit Klick-Handler für RPP-Erstellung
 
 ⚙️ **Technische Besonderheiten**
 - **Tampermonkey CSP-Bypass**: GM_xmlhttpRequest statt fetch
@@ -64,6 +181,8 @@ npm run watch   # Oder: npm run build
 4. **Farbcodierung nutzen**:
    - Grün: Neue Adressen hier einplanen
    - Hellgrün: RPP schon vorhanden, überprüften vorhandene
+5. **RPP erstellen**: Auf grüne Address-Marker klicken
+6. **Cache verwalten**: Bei Bedarf `testQuickPP.clearCache()` in Console ausführen
 
 ---
 
@@ -73,14 +192,14 @@ npm run watch   # Oder: npm run build
 src/
 ├── main.user.ts           # Einstiegspunkt & SDK Orchestrierung
 ├── core/
-│   ├── initialization.ts   # UI Sidebar & Keyboard Shortcutseach
+│   ├── initialization.ts   # UI Sidebar & Keyboard Shortcuts
 │   └── state.ts            # Globaler State mit Event System
 ├── data/
-│   └── api.ts              # kbox.at API Client (GM_xmlhttpRequest)
+│   └── api.ts              # kbox.at API Client + Tile-Cache (GM_xmlhttpRequest)
 ├── logic/
 │   └── segment-selector.ts # Segment-Auswahl & Adress-Filterung
 ├── map/
-│   └── renderer.ts         # WME SDK Layer-Rendering
+│   └── renderer.ts         # WME SDK Layer-Rendering + RPP-Erzeugung
 └── utils/
     └── geo.ts              # Geo-Utilities (Distanzberechnung)
 ```
@@ -93,15 +212,19 @@ Segment-Geometrie → Map-Extent
   ↓
 WGS84 → Web Mercator
   ↓
-kbox.at API POST /adr
+Tile-Cache Check (750m × 750m)
   ↓
-HouseNumber-Check per WME SDK
+kbox.at API POST /adr (falls Cache-Miss)
+  ↓
+Cache speichern + HouseNumber-Check per WME SDK
   ↓
 Straßen-Matching & Fuzzy-Match
   ↓
 Farbcodierung (grün/hellgrün/grau)
   ↓
 WME SDK Layer rendern
+  ↓
+Address-Marker Klick → RPP-Erzeugung
 ```
 
 ---
@@ -169,19 +292,30 @@ testQuickPP.showSegments()           // Segment-Info
 testQuickPP.updatePositions()        // Layer neu rendern
 testQuickPP.loadAddresses()          // Adressen für Segmente laden
 testQuickPP.clear()                  // Alle Marker löschen
+testQuickPP.clearCache()             // Address-Cache leeren
 ```
 
 ---
 
 ## Konfiguration
 
-siehe [src/core/state.ts](src/core/state.ts):
+siehe [src/core/state.ts](src/core/state.ts) und [src/data/api.ts](src/data/api.ts):
 
 ```typescript
+// API Konfiguration
 private config: ScriptConfig = {
     apiBaseUrl: "https://wms.kbox.at",
     searchRadius: 0.5,              // km (Padding um Segmente)
     autoFillDistance: 50,            // Meter
+};
+
+// Cache Konfiguration
+const TILE = {
+    SIZE_M: 750,                    // Tile-Größe in Metern
+    TTL_DAYS: 7,                    // Time-to-Live in Tagen
+    MAX: 300,                       // Max. Anzahl Tiles (LRU)
+    NS: 'WME_PP_TILE_',             // Storage Namespace
+    META: 'WME_PP_META'             // Metadata Key
 };
 ```
 

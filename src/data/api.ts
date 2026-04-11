@@ -1,10 +1,20 @@
-import { appState, Address } from "../core/state";
+import { appState, Address, debug } from "../core/state";
 
 /**
  * kbox.at/adr API Client
  * Abfrage von österreichischen Adressdaten
  * Nach HN Importer (Reloaded) Muster - verwendet nur GM_xmlhttpRequest (kein fetch)
+ * Mit Tile-Cache + FIFO-Queue
  */
+
+// Declare GM_xmlhttpRequest (Tampermonkey API)
+declare function GM_xmlhttpRequest(details: any): void;
+
+// Declare Tampermonkey storage APIs
+declare function GM_getValue(key: string, defaultValue?: any): any;
+declare function GM_setValue(key: string, value: any): void;
+declare function GM_deleteValue(key: string): void;
+declare function GM_listValues(): string[];
 
 export interface AddressDataRaw {
     sn: string; // Straßenname
@@ -18,21 +28,149 @@ export interface AddressResponse {
     addresses: AddressDataRaw[];
 }
 
-// Declare GM_xmlhttpRequest (Tampermonkey API)
-declare function GM_xmlhttpRequest(details: any): void;
+// Tile cache configuration (wie HN Importer)
+const TILE = {
+    SIZE_M: 750,
+    TTL_DAYS: 7,
+    MAX: 300,
+    NS: 'WME_PP_TILE_',
+    META: 'WME_PP_META'
+};
+
+// Persisted storage helpers (TMs/GM)
+const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+const GM_Get = (k: string, d?: any) => { try { return GM_getValue(k, d); } catch { return d; } };
+const GM_Set = (k: string, v: any) => { try { GM_setValue(k, v); } catch {} };
+
+// In-memory tile cache mirror
+const memTiles = new Map<string, any>();
 
 class AddressDataClient {
     private baseUrl = "https://wms.kbox.at";
     private apiPath = "/adr";
     private requestQueue: Promise<any> = Promise.resolve();
 
-    /**
-     * Adressen basierend auf Bounding Box abrufen
-     * @param left Min Längengrad (x1)
-     * @param bottom Min Breitengrad (y1)
-     * @param right Max Längengrad (x2)
-     * @param top Max Breitengrad (y2)
-     */
+    // --- Tile helpers (wie HN Importer) ---
+    private tileKeyForXY(x: number, y: number): string {
+        return `${Math.floor(x / TILE.SIZE_M)}_${Math.floor(y / TILE.SIZE_M)}`;
+    }
+
+    private tilesForBounds(bounds: { left: number; bottom: number; right: number; top: number }): string[] {
+        const x1 = Math.floor(bounds.left / TILE.SIZE_M);
+        const y1 = Math.floor(bounds.bottom / TILE.SIZE_M);
+        const x2 = Math.floor(bounds.right / TILE.SIZE_M);
+        const y2 = Math.floor(bounds.top / TILE.SIZE_M);
+        const keys: string[] = [];
+        for (let ty = y1; ty <= y2; ty += 1) {
+            for (let tx = x1; tx <= x2; tx += 1) {
+                keys.push(`${tx}_${ty}`);
+            }
+        }
+        return keys;
+    }
+
+    private bboxFromTiles(keys: string[]): { x1: number; y1: number; x2: number; y2: number } {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const k of keys) {
+            const [txS, tyS] = k.split('_');
+            const tx = +txS;
+            const ty = +tyS;
+            const left = tx * TILE.SIZE_M;
+            const bottom = ty * TILE.SIZE_M;
+            const right = left + TILE.SIZE_M;
+            const top = bottom + TILE.SIZE_M;
+            minX = Math.min(minX, left);
+            minY = Math.min(minY, bottom);
+            maxX = Math.max(maxX, right);
+            maxY = Math.max(maxY, top);
+        }
+        return { x1: Math.floor(minX), y1: Math.floor(minY), x2: Math.ceil(maxX), y2: Math.ceil(maxY) };
+    }
+
+    private nowDays(): number {
+        return Math.floor(Date.now() / 86400000);
+    }
+
+    private getTileFromStore(key: string): any {
+        const m = memTiles.get(key);
+        if (m) return m;
+        if (!hasGM) return null;
+        try {
+            const raw = GM_getValue(TILE.NS + key, null);
+            if (!raw) return null;
+            const obj = JSON.parse(raw);
+            memTiles.set(key, obj);
+            return obj;
+        } catch {
+            return null;
+        }
+    }
+
+    private putTileToStore(key: string, obj: any): void {
+        memTiles.set(key, obj);
+        if (!hasGM) return;
+        try {
+            GM_setValue(TILE.NS + key, JSON.stringify(obj));
+            const meta = this.loadMeta();
+            this.touchLRU(meta, key);
+            this.enforceLRU(meta);
+            this.saveMeta(meta);
+        } catch {}
+    }
+
+    private loadMeta(): any {
+        if (!hasGM) return { order: [] };
+        try {
+            const m = GM_getValue(TILE.META, null);
+            return m ? JSON.parse(m) : { order: [] };
+        } catch {
+            return { order: [] };
+        }
+    }
+
+    private saveMeta(meta: any): void {
+        if (!hasGM) return;
+        try {
+            GM_setValue(TILE.META, JSON.stringify(meta));
+        } catch {}
+    }
+
+    private touchLRU(meta: any, key: string): void {
+        meta.order = (meta.order || []).filter((k: string) => k !== key);
+        meta.order.push(key);
+    }
+
+    private enforceLRU(meta: any): void {
+        while ((meta.order || []).length > TILE.MAX) {
+            const victim = meta.order.shift();
+            try {
+                GM_deleteValue(TILE.NS + victim);
+            } catch {}
+            memTiles.delete(victim);
+        }
+    }
+
+    private isFresh(tileObj: any): boolean {
+        return !!(tileObj && typeof tileObj.ts === 'number' && this.nowDays() - tileObj.ts <= TILE.TTL_DAYS);
+    }
+
+    // Cache leeren Funktion
+    clearCache(): void {
+        try {
+            if (hasGM) {
+                GM_listValues().forEach(k => {
+                    if (String(k).startsWith(TILE.NS) || k === TILE.META) {
+                        GM_deleteValue(k);
+                    }
+                });
+            }
+            memTiles.clear();
+            debug('🗑️ PP Cache cleared');
+        } catch (e) {
+            console.error('❌ clearCache error', e);
+        }
+    }
+
     async fetchAddressesByBoundingBox(
         left: number,
         bottom: number,
@@ -40,27 +178,154 @@ class AddressDataClient {
         top: number
     ): Promise<Address[]> {
         try {
-            console.log(`📍 Fetching addresses: bbox=[${left},${bottom},${right},${top}]`);
+            debug(`📍 Fetching addresses: bbox=[${left},${bottom},${right},${top}]`);
 
-            const x1 = Math.round(this.lonToWebMercator(left));
-            const y1 = Math.round(this.latToWebMercator(bottom));
-            const x2 = Math.round(this.lonToWebMercator(right));
-            const y2 = Math.round(this.latToWebMercator(top));
+            // Convert WGS84 bounds to Web Mercator first
+            const webMercatorBounds = {
+                left: this.lonToWebMercator(left),
+                bottom: this.latToWebMercator(bottom),
+                right: this.lonToWebMercator(right),
+                top: this.latToWebMercator(top)
+            };
 
-            console.log(`📍 Converted bbox to Web Mercator: [${x1},${y1},${x2},${y2}]`);
+            debug(`📍 Converted bbox to Web Mercator: [${webMercatorBounds.left},${webMercatorBounds.bottom},${webMercatorBounds.right},${webMercatorBounds.top}]`);
 
-            const url = this.baseUrl + this.apiPath;
-            const body = JSON.stringify({ x1, y1, x2, y2 });
+            const neededKeys = this.tilesForBounds(webMercatorBounds);
 
-            // API-Abfrage mit Queue (verhindert Parallel-Requests)
-            const addresses = await this.queuedFetch(url, body);
+            // Try cache first
+            let allFresh = true;
+            let assembled: any[] = [];
+            for (const key of neededKeys) {
+                const tile = this.getTileFromStore(key);
+                debug(`💾 Checking cache for tile ${key}:`, tile ? 'found' : 'not found');
+                if (tile) {
+                    debug(`💾 Tile ${key} fresh:`, this.isFresh(tile));
+                }
+                if (!this.isFresh(tile)) {
+                    allFresh = false;
+                    break;
+                }
+                if (tile?.items?.length) {
+                    assembled = assembled.concat(tile.items);
+                }
+            }
 
-            console.log(`✅ Loaded ${addresses.length} addresses`);
+            if (allFresh) {
+                debug(`💾 Cache hit (${neededKeys.length} tile(s)) - skipping network`);
+                return this.processRawAddresses(assembled);
+            }
+
+            debug(`🌐 Cache miss - fetching ${neededKeys.length} tile(s) from network`);
+            const addresses = await this.fetchTilesFromNetwork(neededKeys);
             return addresses;
         } catch (error) {
             console.error("❌ Error fetching addresses:", error);
             return [];
         }
+    }
+
+    /**
+     * Tiles von der API laden und cachen
+     */
+    private async fetchTilesFromNetwork(neededKeys: string[]): Promise<Address[]> {
+        return new Promise((resolve, reject) => {
+            const body = this.bboxFromTiles(neededKeys);
+            debug(`🔗 Requesting tiles:`, body);
+
+            GM_xmlhttpRequest({
+                method: "POST",
+                url: this.baseUrl + this.apiPath,
+                data: JSON.stringify(body),
+                headers: { "Content-Type": "application/json" },
+                timeout: 10000,
+                onload: (response: any) => {
+                    try {
+                        if (response.status >= 200 && response.status < 300) {
+                            let result: any;
+                            
+                            try {
+                                result = JSON.parse(response.responseText || '[]');
+                            } catch (e) {
+                                console.error('❌ JSON parse fail', e, response.responseText);
+                                reject(new Error(`API JSON parse error: ${e}`));
+                                return;
+                            }
+
+                            debug(`📦 Parsed response:`, result);
+                            debug(`📦 Is array:`, Array.isArray(result));
+
+                            if (!Array.isArray(result)) {
+                                console.error(`❌ API Response is not an array:`, result);
+                                reject(new Error(`API returned unexpected format: expected array of addresses`));
+                                return;
+                            }
+
+                            // Bucket addresses by tile
+                            const buckets = new Map<string, any[]>();
+                            for (const r of result) {
+                                const x = r.lon;
+                                const y = r.lat;
+                                const key = this.tileKeyForXY(x, y);
+                                if (!buckets.has(key)) buckets.set(key, []);
+                                buckets.get(key)!.push({
+                                    lon: x,
+                                    lat: y,
+                                    strassenname: r.strassenname || r.sn || "",
+                                    hausnummerzahl1: r.hausnummerzahl1 || r.hn || "",
+                                    gemeinde: r.gemeinde || r.gn || ""
+                                });
+                            }
+
+                            // Store tiles and assemble result
+                            const today = this.nowDays();
+                            let assembled: any[] = [];
+                            for (const k of neededKeys) {
+                                const items = buckets.get(k) || [];
+                                this.putTileToStore(k, { ts: today, items });
+                                assembled = assembled.concat(items);
+                            }
+
+                            debug(`✅ Loaded ${assembled.length} addresses from ${neededKeys.length} tiles`);
+                            resolve(this.processRawAddresses(assembled));
+                        } else {
+                            console.error(`❌ API Error Status ${response.status}: ${response.responseText}`);
+                            reject(new Error(`API Error: ${response.status} - ${response.statusText}`));
+                        }
+                    } catch (error) {
+                        console.error(`❌ Parse error:`, error);
+                        reject(error);
+                    }
+                },
+                onerror: (error: any) => {
+                    console.error(`❌ GM_xmlhttpRequest error:`, error);
+                    const errorMsg = error && error.message ? error.message : String(error);
+                    reject(new Error(`Network error: ${errorMsg}`));
+                },
+                ontimeout: () => {
+                    console.error(`❌ Request timeout`);
+                    reject(new Error("Request timeout"));
+                }
+            });
+        });
+    }
+
+    /**
+     * Raw API Daten zu Address-Objekten konvertieren
+     */
+    private processRawAddresses(rawAddresses: any[]): Address[] {
+        return rawAddresses.map((raw: any, index: number) => {
+            const [longitude, latitude] = this.webMercatorToLonLat(raw.lon, raw.lat);
+            return {
+                id: `addr-${Date.now()}-${index}`,
+                latitude,
+                longitude,
+                streetName: raw.strassenname || raw.sn || "",
+                houseNumber: raw.hausnummerzahl1 || raw.hn || "",
+                city: raw.gemeinde || raw.gn || "",
+                status: "gray" as const,
+                markerId: undefined,
+            };
+        });
     }
 
     private lonToWebMercator(lon: number): number {
@@ -83,140 +348,11 @@ class AddressDataClient {
      * (wird später erweitert für WME-Integration)
      */
     async fetchAddressesBySegment(segmentIds: string[]): Promise<Address[]> {
-        // TODO: Segmentdaten von WME SDK abrufen
-        // und dann fetchAddressesByLocation aufrufen
-        console.log("🔄 Fetching by segment IDs:", segmentIds);
+        debug("🔄 Fetching by segment IDs:", segmentIds);
         return [];
-    }
-
-    /**
-     * Queue-basierte Abfrage (verhindert Race Conditions)
-     */
-    private queuedFetch(url: string, data?: string): Promise<Address[]> {
-        this.requestQueue = this.requestQueue.then(() => {
-            return this.performFetch(url, data);
-        });
-        return this.requestQueue;
-    }
-
-    /**
-     * Eigentliche Fetch-Operation mit GM_xmlhttpRequest (umgeht CSP)
-     * Nach HN Importer Reloaded Muster - KEIN fetch fallback!
-     */
-    private performFetch(url: string, data?: string): Promise<Address[]> {
-        return new Promise((resolve, reject) => {
-            // IMMER GM_xmlhttpRequest verwenden (Tampermonkey API)
-            // Dies umgeht Content Security Policy vollständig
-            console.log(`🔗 Requesting: ${url}`);
-            
-            const requestDetails: any = {
-                method: data ? "POST" : "GET",
-                url: url,
-                timeout: 10000,
-                headers: data ? {
-                    "Content-Type": "application/json"
-                } : undefined,
-                data: data ?? undefined,
-                onload: (response: any) => {
-                    try {
-                        console.log(`📦 Response status: ${response.status}`);
-                        
-                        if (response.status >= 200 && response.status < 300) {
-                            const data = JSON.parse(response.responseText);
-                            console.log(`📦 Parsed response:`, data);
-                            
-                            // Die API gibt wahrscheinlich ein Array direkt zurück, nicht {addresses: [...]}
-                            let addressesArray = data;
-                            if (data.addresses) {
-                                // Falls es {addresses: [...]} Format ist
-                                addressesArray = data.addresses;
-                            } else if (Array.isArray(data)) {
-                                // Falls es direkt ein Array ist
-                                addressesArray = data;
-                            }
-                            
-                            if (!Array.isArray(addressesArray)) {
-                                console.error(`❌ API Response is not an array:`, data);
-                                reject(new Error(`API returned unexpected format: expected array of addresses`));
-                                return;
-                            }
-
-                            // Raw-Daten zu Address-Objekten konvertieren
-                            const addresses = addressesArray.map((raw: any, index: number) => {
-                                const [longitude, latitude] = this.webMercatorToLonLat(raw.lon, raw.lat);
-                                return {
-                                    id: `addr-${Date.now()}-${index}`,
-                                    latitude,
-                                    longitude,
-                                    streetName: raw.strassenname || raw.sn || "",
-                                    houseNumber: raw.hausnummerzahl1 || raw.hn || "",
-                                    city: raw.gn || "",
-                                    status: "gray" as const, // Initiale Status
-                                    markerId: undefined,
-                                };
-                            });
-                            
-                            console.log(`✅ API Response: ${addresses.length} addresses`);
-                            resolve(addresses);
-                        } else {
-                            console.error(`❌ API Error Status ${response.status}: ${response.responseText}`);
-                            reject(new Error(`API Error: ${response.status} - ${response.statusText}`));
-                        }
-                    } catch (error) {
-                        console.error(`❌ Parse error:`, error);
-                        console.error(`❌ Response text:`, response.responseText);
-                        reject(error);
-                    }
-                },
-                onerror: (error: any) => {
-                    console.error(`❌ GM_xmlhttpRequest error:`, error);
-                    // error ist ein Error-Objekt, nicht etwas das man stringifizieren kann
-                    const errorMsg = error && error.message ? error.message : String(error);
-                    reject(new Error(`Network error: ${errorMsg}`));
-                },
-                ontimeout: () => {
-                    console.error(`❌ Request timeout`);
-                    reject(new Error("Request timeout"));
-                }
-            };
-
-            console.log(`🔧 Request method: ${requestDetails.method}`);
-            if (requestDetails.data) {
-                console.log(`🔧 Request body: ${requestDetails.data}`);
-            }
-
-            GM_xmlhttpRequest(requestDetails);
-        });
     }
 }
 
 export const addressDataClient = new AddressDataClient();
 
-/**
- * Mock-Daten für Development/Testing (ohne API-Abfrage)
- */
-export function generateMockAddresses(count: number = 10): Address[] {
-    const mockData: AddressDataRaw[] = [
-        { sn: "Stephansplatz", hn: "1", gn: "Wien", lat: 48.2082, lon: 16.3738 },
-        { sn: "Stephansplatz", hn: "2", gn: "Wien", lat: 48.2083, lon: 16.3739 },
-        { sn: "Stephansplatz", hn: "3", gn: "Wien", lat: 48.2084, lon: 16.3740 },
-        { sn: "Stephansplatz", hn: "4", gn: "Wien", lat: 48.2085, lon: 16.3741 },
-        { sn: "Graben", hn: "5", gn: "Wien", lat: 48.2088, lon: 16.3745 },
-        { sn: "Graben", hn: "6", gn: "Wien", lat: 48.2089, lon: 16.3746 },
-        { sn: "Kohlmarkt", hn: "7", gn: "Wien", lat: 48.2090, lon: 16.3750 },
-        { sn: "Kohlmarkt", hn: "8", gn: "Wien", lat: 48.2091, lon: 16.3751 },
-        { sn: "Herrengasse", hn: "9", gn: "Wien", lat: 48.2092, lon: 16.3752 },
-        { sn: "Herrengasse", hn: "10", gn: "Wien", lat: 48.2093, lon: 16.3753 },
-    ];
-
-    return mockData.slice(0, count).map((raw, index) => ({
-        id: `mock-addr-${index}`,
-        latitude: raw.lat,
-        longitude: raw.lon,
-        streetName: raw.sn,
-        houseNumber: raw.hn,
-        city: raw.gn,
-        status: "gray" as const,
-        markerId: undefined,
-    }));
-}
+export const clearAddressCache = () => addressDataClient.clearCache();

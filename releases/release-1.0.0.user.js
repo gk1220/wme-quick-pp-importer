@@ -14,6 +14,7 @@
 // @exclude     https://beta.waze.com/user/editor*
 // @connect     wms.kbox.at
 // @grant       GM_xmlhttpRequest
+// @grant       unsafeWindow
 // ==/UserScript==
 (function () {
     'use strict';
@@ -48,12 +49,19 @@
         }
         deactivateImport() {
             this.importState.isActive = false;
+            this.importState.isPaused = false;
             this.emit("importDeactivated");
             this.clearAddresses();
         }
         togglePause() {
             this.importState.isPaused = !this.importState.isPaused;
             this.emit(this.importState.isPaused ? "importPaused" : "importResumed");
+        }
+        _debugMode = false;
+        get debugMode() { return this._debugMode; }
+        setDebugMode(val) {
+            this._debugMode = val;
+            console.log(`🔧 Debug Mode: ${val ? 'AN' : 'AUS'}`);
         }
         getImportState() {
             return { ...this.importState };
@@ -71,6 +79,16 @@
         }
         getAddresses() {
             return [...this.importState.loadedAddresses];
+        }
+        getAddressById(id) {
+            return this.importState.loadedAddresses.find(a => a.id === id);
+        }
+        markAddressProcessed(id) {
+            const address = this.importState.loadedAddresses.find(a => a.id === id);
+            if (address) {
+                address.status = 'lightGreen';
+                this.emit("addressUpdated", address);
+            }
         }
         clearAddresses() {
             this.importState.loadedAddresses = [];
@@ -122,29 +140,273 @@
         }
     }
     const appState = new AppState();
+    function debug(...args) {
+        if (appState.debugMode)
+            console.log(...args);
+    }
 
+    const TILE = {
+        SIZE_M: 750,
+        TTL_DAYS: 7,
+        MAX: 300,
+        NS: 'WME_PP_TILE_',
+        META: 'WME_PP_META'
+    };
+    const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+    const memTiles = new Map();
     class AddressDataClient {
         baseUrl = "https://wms.kbox.at";
         apiPath = "/adr";
         requestQueue = Promise.resolve();
+        tileKeyForXY(x, y) {
+            return `${Math.floor(x / TILE.SIZE_M)}_${Math.floor(y / TILE.SIZE_M)}`;
+        }
+        tilesForBounds(bounds) {
+            const x1 = Math.floor(bounds.left / TILE.SIZE_M);
+            const y1 = Math.floor(bounds.bottom / TILE.SIZE_M);
+            const x2 = Math.floor(bounds.right / TILE.SIZE_M);
+            const y2 = Math.floor(bounds.top / TILE.SIZE_M);
+            const keys = [];
+            for (let ty = y1; ty <= y2; ty += 1) {
+                for (let tx = x1; tx <= x2; tx += 1) {
+                    keys.push(`${tx}_${ty}`);
+                }
+            }
+            return keys;
+        }
+        bboxFromTiles(keys) {
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            for (const k of keys) {
+                const [txS, tyS] = k.split('_');
+                const tx = +txS;
+                const ty = +tyS;
+                const left = tx * TILE.SIZE_M;
+                const bottom = ty * TILE.SIZE_M;
+                const right = left + TILE.SIZE_M;
+                const top = bottom + TILE.SIZE_M;
+                minX = Math.min(minX, left);
+                minY = Math.min(minY, bottom);
+                maxX = Math.max(maxX, right);
+                maxY = Math.max(maxY, top);
+            }
+            return { x1: Math.floor(minX), y1: Math.floor(minY), x2: Math.ceil(maxX), y2: Math.ceil(maxY) };
+        }
+        nowDays() {
+            return Math.floor(Date.now() / 86400000);
+        }
+        getTileFromStore(key) {
+            const m = memTiles.get(key);
+            if (m)
+                return m;
+            if (!hasGM)
+                return null;
+            try {
+                const raw = GM_getValue(TILE.NS + key, null);
+                if (!raw)
+                    return null;
+                const obj = JSON.parse(raw);
+                memTiles.set(key, obj);
+                return obj;
+            }
+            catch {
+                return null;
+            }
+        }
+        putTileToStore(key, obj) {
+            memTiles.set(key, obj);
+            if (!hasGM)
+                return;
+            try {
+                GM_setValue(TILE.NS + key, JSON.stringify(obj));
+                const meta = this.loadMeta();
+                this.touchLRU(meta, key);
+                this.enforceLRU(meta);
+                this.saveMeta(meta);
+            }
+            catch { }
+        }
+        loadMeta() {
+            if (!hasGM)
+                return { order: [] };
+            try {
+                const m = GM_getValue(TILE.META, null);
+                return m ? JSON.parse(m) : { order: [] };
+            }
+            catch {
+                return { order: [] };
+            }
+        }
+        saveMeta(meta) {
+            if (!hasGM)
+                return;
+            try {
+                GM_setValue(TILE.META, JSON.stringify(meta));
+            }
+            catch { }
+        }
+        touchLRU(meta, key) {
+            meta.order = (meta.order || []).filter((k) => k !== key);
+            meta.order.push(key);
+        }
+        enforceLRU(meta) {
+            while ((meta.order || []).length > TILE.MAX) {
+                const victim = meta.order.shift();
+                try {
+                    GM_deleteValue(TILE.NS + victim);
+                }
+                catch { }
+                memTiles.delete(victim);
+            }
+        }
+        isFresh(tileObj) {
+            return !!(tileObj && typeof tileObj.ts === 'number' && this.nowDays() - tileObj.ts <= TILE.TTL_DAYS);
+        }
+        clearCache() {
+            try {
+                if (hasGM) {
+                    GM_listValues().forEach(k => {
+                        if (String(k).startsWith(TILE.NS) || k === TILE.META) {
+                            GM_deleteValue(k);
+                        }
+                    });
+                }
+                memTiles.clear();
+                debug('🗑️ PP Cache cleared');
+            }
+            catch (e) {
+                console.error('❌ clearCache error', e);
+            }
+        }
         async fetchAddressesByBoundingBox(left, bottom, right, top) {
             try {
-                console.log(`📍 Fetching addresses: bbox=[${left},${bottom},${right},${top}]`);
-                const x1 = Math.round(this.lonToWebMercator(left));
-                const y1 = Math.round(this.latToWebMercator(bottom));
-                const x2 = Math.round(this.lonToWebMercator(right));
-                const y2 = Math.round(this.latToWebMercator(top));
-                console.log(`📍 Converted bbox to Web Mercator: [${x1},${y1},${x2},${y2}]`);
-                const url = this.baseUrl + this.apiPath;
-                const body = JSON.stringify({ x1, y1, x2, y2 });
-                const addresses = await this.queuedFetch(url, body);
-                console.log(`✅ Loaded ${addresses.length} addresses`);
+                debug(`📍 Fetching addresses: bbox=[${left},${bottom},${right},${top}]`);
+                const webMercatorBounds = {
+                    left: this.lonToWebMercator(left),
+                    bottom: this.latToWebMercator(bottom),
+                    right: this.lonToWebMercator(right),
+                    top: this.latToWebMercator(top)
+                };
+                debug(`📍 Converted bbox to Web Mercator: [${webMercatorBounds.left},${webMercatorBounds.bottom},${webMercatorBounds.right},${webMercatorBounds.top}]`);
+                const neededKeys = this.tilesForBounds(webMercatorBounds);
+                let allFresh = true;
+                let assembled = [];
+                for (const key of neededKeys) {
+                    const tile = this.getTileFromStore(key);
+                    debug(`💾 Checking cache for tile ${key}:`, tile ? 'found' : 'not found');
+                    if (tile) {
+                        debug(`💾 Tile ${key} fresh:`, this.isFresh(tile));
+                    }
+                    if (!this.isFresh(tile)) {
+                        allFresh = false;
+                        break;
+                    }
+                    if (tile?.items?.length) {
+                        assembled = assembled.concat(tile.items);
+                    }
+                }
+                if (allFresh) {
+                    debug(`💾 Cache hit (${neededKeys.length} tile(s)) - skipping network`);
+                    return this.processRawAddresses(assembled);
+                }
+                debug(`🌐 Cache miss - fetching ${neededKeys.length} tile(s) from network`);
+                const addresses = await this.fetchTilesFromNetwork(neededKeys);
                 return addresses;
             }
             catch (error) {
                 console.error("❌ Error fetching addresses:", error);
                 return [];
             }
+        }
+        async fetchTilesFromNetwork(neededKeys) {
+            return new Promise((resolve, reject) => {
+                const body = this.bboxFromTiles(neededKeys);
+                debug(`🔗 Requesting tiles:`, body);
+                GM_xmlhttpRequest({
+                    method: "POST",
+                    url: this.baseUrl + this.apiPath,
+                    data: JSON.stringify(body),
+                    headers: { "Content-Type": "application/json" },
+                    timeout: 10000,
+                    onload: (response) => {
+                        try {
+                            if (response.status >= 200 && response.status < 300) {
+                                let result;
+                                try {
+                                    result = JSON.parse(response.responseText || '[]');
+                                }
+                                catch (e) {
+                                    console.error('❌ JSON parse fail', e, response.responseText);
+                                    reject(new Error(`API JSON parse error: ${e}`));
+                                    return;
+                                }
+                                debug(`📦 Parsed response:`, result);
+                                debug(`📦 Is array:`, Array.isArray(result));
+                                if (!Array.isArray(result)) {
+                                    console.error(`❌ API Response is not an array:`, result);
+                                    reject(new Error(`API returned unexpected format: expected array of addresses`));
+                                    return;
+                                }
+                                const buckets = new Map();
+                                for (const r of result) {
+                                    const x = r.lon;
+                                    const y = r.lat;
+                                    const key = this.tileKeyForXY(x, y);
+                                    if (!buckets.has(key))
+                                        buckets.set(key, []);
+                                    buckets.get(key).push({
+                                        lon: x,
+                                        lat: y,
+                                        strassenname: r.strassenname || r.sn || "",
+                                        hausnummerzahl1: r.hausnummerzahl1 || r.hn || "",
+                                        gemeinde: r.gemeinde || r.gn || ""
+                                    });
+                                }
+                                const today = this.nowDays();
+                                let assembled = [];
+                                for (const k of neededKeys) {
+                                    const items = buckets.get(k) || [];
+                                    this.putTileToStore(k, { ts: today, items });
+                                    assembled = assembled.concat(items);
+                                }
+                                debug(`✅ Loaded ${assembled.length} addresses from ${neededKeys.length} tiles`);
+                                resolve(this.processRawAddresses(assembled));
+                            }
+                            else {
+                                console.error(`❌ API Error Status ${response.status}: ${response.responseText}`);
+                                reject(new Error(`API Error: ${response.status} - ${response.statusText}`));
+                            }
+                        }
+                        catch (error) {
+                            console.error(`❌ Parse error:`, error);
+                            reject(error);
+                        }
+                    },
+                    onerror: (error) => {
+                        console.error(`❌ GM_xmlhttpRequest error:`, error);
+                        const errorMsg = error && error.message ? error.message : String(error);
+                        reject(new Error(`Network error: ${errorMsg}`));
+                    },
+                    ontimeout: () => {
+                        console.error(`❌ Request timeout`);
+                        reject(new Error("Request timeout"));
+                    }
+                });
+            });
+        }
+        processRawAddresses(rawAddresses) {
+            return rawAddresses.map((raw, index) => {
+                const [longitude, latitude] = this.webMercatorToLonLat(raw.lon, raw.lat);
+                return {
+                    id: `addr-${Date.now()}-${index}`,
+                    latitude,
+                    longitude,
+                    streetName: raw.strassenname || raw.sn || "",
+                    houseNumber: raw.hausnummerzahl1 || raw.hn || "",
+                    city: raw.gemeinde || raw.gn || "",
+                    status: "gray",
+                    markerId: undefined,
+                };
+            });
         }
         lonToWebMercator(lon) {
             return lon * 6378137 * (Math.PI / 180);
@@ -159,114 +421,12 @@
             return [lon, lat];
         }
         async fetchAddressesBySegment(segmentIds) {
-            console.log("🔄 Fetching by segment IDs:", segmentIds);
+            debug("🔄 Fetching by segment IDs:", segmentIds);
             return [];
-        }
-        queuedFetch(url, data) {
-            this.requestQueue = this.requestQueue.then(() => {
-                return this.performFetch(url, data);
-            });
-            return this.requestQueue;
-        }
-        performFetch(url, data) {
-            return new Promise((resolve, reject) => {
-                console.log(`🔗 Requesting: ${url}`);
-                const requestDetails = {
-                    method: data ? "POST" : "GET",
-                    url: url,
-                    timeout: 10000,
-                    headers: data ? {
-                        "Content-Type": "application/json"
-                    } : undefined,
-                    data: data ?? undefined,
-                    onload: (response) => {
-                        try {
-                            console.log(`📦 Response status: ${response.status}`);
-                            if (response.status >= 200 && response.status < 300) {
-                                const data = JSON.parse(response.responseText);
-                                console.log(`📦 Parsed response:`, data);
-                                let addressesArray = data;
-                                if (data.addresses) {
-                                    addressesArray = data.addresses;
-                                }
-                                else if (Array.isArray(data)) {
-                                    addressesArray = data;
-                                }
-                                if (!Array.isArray(addressesArray)) {
-                                    console.error(`❌ API Response is not an array:`, data);
-                                    reject(new Error(`API returned unexpected format: expected array of addresses`));
-                                    return;
-                                }
-                                const addresses = addressesArray.map((raw, index) => {
-                                    const [longitude, latitude] = this.webMercatorToLonLat(raw.lon, raw.lat);
-                                    return {
-                                        id: `addr-${Date.now()}-${index}`,
-                                        latitude,
-                                        longitude,
-                                        streetName: raw.strassenname || raw.sn || "",
-                                        houseNumber: raw.hausnummerzahl1 || raw.hn || "",
-                                        city: raw.gn || "",
-                                        status: "gray",
-                                        markerId: undefined,
-                                    };
-                                });
-                                console.log(`✅ API Response: ${addresses.length} addresses`);
-                                resolve(addresses);
-                            }
-                            else {
-                                console.error(`❌ API Error Status ${response.status}: ${response.responseText}`);
-                                reject(new Error(`API Error: ${response.status} - ${response.statusText}`));
-                            }
-                        }
-                        catch (error) {
-                            console.error(`❌ Parse error:`, error);
-                            console.error(`❌ Response text:`, response.responseText);
-                            reject(error);
-                        }
-                    },
-                    onerror: (error) => {
-                        console.error(`❌ GM_xmlhttpRequest error:`, error);
-                        const errorMsg = error && error.message ? error.message : String(error);
-                        reject(new Error(`Network error: ${errorMsg}`));
-                    },
-                    ontimeout: () => {
-                        console.error(`❌ Request timeout`);
-                        reject(new Error("Request timeout"));
-                    }
-                };
-                console.log(`🔧 Request method: ${requestDetails.method}`);
-                if (requestDetails.data) {
-                    console.log(`🔧 Request body: ${requestDetails.data}`);
-                }
-                GM_xmlhttpRequest(requestDetails);
-            });
         }
     }
     const addressDataClient = new AddressDataClient();
-    function generateMockAddresses(count = 10) {
-        const mockData = [
-            { sn: "Stephansplatz", hn: "1", gn: "Wien", lat: 48.2082, lon: 16.3738 },
-            { sn: "Stephansplatz", hn: "2", gn: "Wien", lat: 48.2083, lon: 16.3739 },
-            { sn: "Stephansplatz", hn: "3", gn: "Wien", lat: 48.2084, lon: 16.3740 },
-            { sn: "Stephansplatz", hn: "4", gn: "Wien", lat: 48.2085, lon: 16.3741 },
-            { sn: "Graben", hn: "5", gn: "Wien", lat: 48.2088, lon: 16.3745 },
-            { sn: "Graben", hn: "6", gn: "Wien", lat: 48.2089, lon: 16.3746 },
-            { sn: "Kohlmarkt", hn: "7", gn: "Wien", lat: 48.2090, lon: 16.3750 },
-            { sn: "Kohlmarkt", hn: "8", gn: "Wien", lat: 48.2091, lon: 16.3751 },
-            { sn: "Herrengasse", hn: "9", gn: "Wien", lat: 48.2092, lon: 16.3752 },
-            { sn: "Herrengasse", hn: "10", gn: "Wien", lat: 48.2093, lon: 16.3753 },
-        ];
-        return mockData.slice(0, count).map((raw, index) => ({
-            id: `mock-addr-${index}`,
-            latitude: raw.lat,
-            longitude: raw.lon,
-            streetName: raw.sn,
-            houseNumber: raw.hn,
-            city: raw.gn,
-            status: "gray",
-            markerId: undefined,
-        }));
-    }
+    const clearAddressCache = () => addressDataClient.clearCache();
 
     class MapRenderer {
         wmeSDK = null;
@@ -326,22 +486,50 @@
             if (!this.wmeSDK)
                 return;
             this.wmeSDK.Events.on({
-                eventName: "wme-layer-feature-clicked",
+                eventName: "wme-map-mouse-click",
                 eventHandler: (clickEvent) => {
-                    if (clickEvent.layerName !== this.layerName)
+                    if (!appState.getImportState().isActive)
                         return;
-                    const feature = clickEvent.feature;
-                    const address = {
-                        id: feature.id,
-                        latitude: feature.geometry.coordinates[1],
-                        longitude: feature.geometry.coordinates[0],
-                        streetName: feature.properties.streetName,
-                        houseNumber: feature.properties.houseNumber,
-                        city: feature.properties.city,
-                        status: feature.properties.status
-                    };
-                    console.log(`📌 Address selected:`, address);
+                    if (appState.getImportState().isPaused)
+                        return;
+                    const clickLon = clickEvent.lon;
+                    const clickLat = clickEvent.lat;
+                    const cosLat = Math.cos(clickLat * Math.PI / 180);
+                    const THRESHOLD_M = 40;
+                    const addresses = appState.getAddresses();
+                    let nearest = null;
+                    let nearestDist = Infinity;
+                    for (const addr of addresses) {
+                        if (addr.status === 'lightGreen')
+                            continue;
+                        const dLat = (addr.latitude - clickLat) * 111000;
+                        const dLon = (addr.longitude - clickLon) * 111000 * cosLat;
+                        const dist = Math.hypot(dLat, dLon);
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearest = addr;
+                        }
+                    }
+                    const nearby = addresses
+                        .filter(a => a.status !== 'lightGreen')
+                        .map(a => ({
+                        name: `${a.streetName} ${a.houseNumber}`,
+                        dist: Math.hypot((a.latitude - clickLat) * 111000, (a.longitude - clickLon) * 111000 * cosLat)
+                    }))
+                        .filter(a => a.dist < 100)
+                        .sort((a, b) => a.dist - b.dist);
+                    if (nearby.length > 0) {
+                        debug(`🔍 Addresses within 100m of click:`, nearby.map(a => `${a.name} (${a.dist.toFixed(1)}m)`));
+                    }
+                    if (!nearest || nearestDist > THRESHOLD_M)
+                        return;
+                    const address = nearest;
+                    debug(`📌 Nearest address ${nearestDist.toFixed(0)}m away: ${address.streetName} ${address.houseNumber} — RPP at click pos`);
                     appState.selectAddress(address);
+                    this.createPlacePoint(address, { lon: clickLon, lat: clickLat }).then(() => {
+                        appState.markAddressProcessed(address.id);
+                        this.refreshMarker(address.id);
+                    });
                 }
             });
             this.wmeSDK.Events.on({
@@ -357,13 +545,13 @@
                 console.error("❌ WME SDK or layer not initialized");
                 return;
             }
-            console.log(`🎨 Rendering ${addresses.length} address markers`);
+            debug(`🎨 Rendering ${addresses.length} address markers`);
             try {
                 this.wmeSDK.Map.removeAllFeaturesFromLayer({
                     layerName: this.layerName
                 });
                 if (addresses.length === 0) {
-                    console.log("📍 No addresses to render");
+                    debug("📍 No addresses to render");
                     this.setLayerVisibility(false);
                     return;
                 }
@@ -386,7 +574,7 @@
                     features: features
                 });
                 this.setLayerVisibility(true);
-                console.log(`📍 ${addresses.length} addresses loaded:`, addresses);
+                debug(`📍 ${addresses.length} addresses rendered`);
             }
             catch (error) {
                 console.error("❌ Error rendering addresses:", error);
@@ -412,10 +600,344 @@
                 visibility: visible
             });
         }
-        redrawLayer() {
+        refreshMarker(addressId) {
+            if (!this.wmeSDK || !this.isLayerCreated)
+                return;
+            const address = appState.getAddressById(addressId);
+            if (!address)
+                return;
+            try {
+                this.wmeSDK.Map.removeFeaturesFromLayer({
+                    layerName: this.layerName,
+                    featureIds: [addressId]
+                });
+                this.wmeSDK.Map.addFeaturesToLayer({
+                    layerName: this.layerName,
+                    features: [{
+                            type: "Feature",
+                            id: address.id,
+                            geometry: { type: "Point", coordinates: [address.longitude, address.latitude] },
+                            properties: {
+                                streetName: address.streetName,
+                                houseNumber: address.houseNumber,
+                                city: address.city,
+                                status: address.status
+                            }
+                        }]
+                });
+            }
+            catch (e) {
+                this.renderAddresses(appState.getAddresses());
+            }
+        }
+        async createPlacePoint(address, position) {
+            try {
+                const placeLon = position?.lon ?? address.longitude;
+                const placeLat = position?.lat ?? address.latitude;
+                debug(`🏠 Creating RPP: ${address.streetName} ${address.houseNumber}`, position ? `at (${placeLon.toFixed(6)}, ${placeLat.toFixed(6)})` : '');
+                if (this.wmeSDK) {
+                    try {
+                        const geometry = { type: 'Point', coordinates: [placeLon, placeLat] };
+                        const newPlaceId = this.wmeSDK.DataModel.Venues.addVenue({ category: 'RESIDENTIAL', geometry }).toString();
+                        debug(`✅ Created place via SDK: id=${newPlaceId}`);
+                        try {
+                            this.wmeSDK.DataModel.Venues.replaceNavigationPoints({
+                                venueId: newPlaceId,
+                                navigationPoints: [{ isEntry: true, isPrimary: true, point: geometry }]
+                            });
+                            debug(`🔁 Navigation point set for venue ${newPlaceId}`);
+                        }
+                        catch (navErr) {
+                            console.warn(`⚠️ Failed to set navigation points for ${newPlaceId}:`, navErr);
+                        }
+                        let streetFound = false;
+                        try {
+                            let streetId = undefined;
+                            const closestStreetId = this.findClosestSegmentStreetId(placeLon, placeLat, address.streetName);
+                            if (closestStreetId != null) {
+                                streetId = closestStreetId;
+                                const allStreets = this.wmeSDK.DataModel.Streets.getAll();
+                                const matchedStreet = allStreets.find(s => s.id === closestStreetId);
+                                const matchedName = matchedStreet?.name?.trim().toLowerCase();
+                                const targetName = address.streetName?.trim().toLowerCase();
+                                streetFound = !!(matchedName && targetName && matchedName === targetName);
+                                debug(`🛣️ Street: streetId=${streetId}, name="${matchedStreet?.name}", matched=${streetFound}`);
+                            }
+                            if (address.houseNumber || streetId) {
+                                this.wmeSDK.DataModel.Venues.updateAddress({
+                                    venueId: newPlaceId,
+                                    houseNumber: address.houseNumber || '',
+                                    ...(streetId ? { streetId } : {})
+                                });
+                                debug(`📝 Address set for venue ${newPlaceId} (streetFound=${streetFound})`);
+                            }
+                        }
+                        catch (addrErr) {
+                            console.warn(`⚠️ Failed to update address for ${newPlaceId}:`, addrErr);
+                        }
+                        try {
+                            this.wmeSDK.Editing.setSelection({ selection: { objectType: 'venue', ids: [newPlaceId] } });
+                            debug(`🔎 Selected new venue ${newPlaceId}`);
+                        }
+                        catch (selErr) {
+                            console.warn(`⚠️ Failed to select new venue ${newPlaceId}:`, selErr);
+                        }
+                        if (!streetFound) {
+                            debug(`📋 Street not resolved for "${address.streetName}" — opening address editor`);
+                            setTimeout(() => this.openAddressEditor(), 50);
+                        }
+                        else {
+                            debug(`✅ Street resolved for "${address.streetName}" — address complete`);
+                        }
+                        return;
+                    }
+                    catch (sdkErr) {
+                        console.error('❌ SDK-based place creation failed:', sdkErr);
+                    }
+                }
+                else {
+                    console.warn('⚠️ WME SDK not initialized; falling back to UI simulation');
+                }
+                await this.activatePlacePointTool(address);
+                await this.fillPlacePointData(address);
+                debug(`✅ RPP creation initiated for: ${address.streetName} ${address.houseNumber}`);
+            }
+            catch (error) {
+                console.error(`❌ Error creating RPP:`, error);
+            }
+        }
+        findClosestSegmentStreetId(lon, lat, streetName) {
+            try {
+                const segments = this.wmeSDK.DataModel.Segments?.getAll?.();
+                if (!segments || segments.length === 0)
+                    return null;
+                let matchingStreetIds = null;
+                if (streetName) {
+                    const normalizedTarget = streetName.trim().toLowerCase();
+                    const allStreets = this.wmeSDK.DataModel.Streets.getAll();
+                    const matched = allStreets.filter(s => s.name?.trim().toLowerCase() === normalizedTarget);
+                    if (matched.length > 0) {
+                        matchingStreetIds = new Set(matched.map(s => s.id));
+                    }
+                }
+                const getMatchAndDist = (seg) => {
+                    const coords = seg.geometry?.coordinates;
+                    if (!coords || coords.length < 2)
+                        return null;
+                    let minDist = Infinity;
+                    for (let i = 0; i < coords.length - 1; i++) {
+                        const d = this.distPointToSegment(lon, lat, coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+                        if (d < minDist)
+                            minDist = d;
+                    }
+                    if (!matchingStreetIds) {
+                        if (seg.primaryStreetId == null)
+                            return null;
+                        return { streetId: seg.primaryStreetId, dist: minDist };
+                    }
+                    if (seg.primaryStreetId != null && matchingStreetIds.has(seg.primaryStreetId)) {
+                        return { streetId: seg.primaryStreetId, dist: minDist };
+                    }
+                    for (const altId of (seg.alternateStreetIds ?? [])) {
+                        if (matchingStreetIds.has(altId)) {
+                            return { streetId: altId, dist: minDist };
+                        }
+                    }
+                    return null;
+                };
+                let bestStreetId = null;
+                let bestDist = Infinity;
+                if (matchingStreetIds) {
+                    for (const seg of segments) {
+                        const result = getMatchAndDist(seg);
+                        if (result && result.dist < bestDist) {
+                            bestDist = result.dist;
+                            bestStreetId = result.streetId;
+                        }
+                    }
+                }
+                if (bestStreetId === null) {
+                    console.warn(`⚠️ No segment found with street name "${streetName}" — falling back to closest segment`);
+                    for (const seg of segments) {
+                        if (seg.primaryStreetId == null)
+                            continue;
+                        const coords = seg.geometry?.coordinates;
+                        if (!coords || coords.length < 2)
+                            continue;
+                        for (let i = 0; i < coords.length - 1; i++) {
+                            const d = this.distPointToSegment(lon, lat, coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1]);
+                            if (d < bestDist) {
+                                bestDist = d;
+                                bestStreetId = seg.primaryStreetId;
+                            }
+                        }
+                    }
+                }
+                return bestStreetId;
+            }
+            catch (e) {
+                console.warn('⚠️ Segment street lookup failed:', e);
+                return null;
+            }
+        }
+        distPointToSegment(px, py, ax, ay, bx, by) {
+            const dx = bx - ax;
+            const dy = by - ay;
+            const lenSq = dx * dx + dy * dy;
+            if (lenSq === 0)
+                return Math.hypot(px - ax, py - ay);
+            const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+            return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+        }
+        async openAddressEditor(tries = 1) {
+            const addressEditView = document.querySelector('.address-edit-view');
+            if (addressEditView) {
+                const fullAddress = addressEditView.querySelector('.full-address');
+                fullAddress?.click();
+                await this.sleep(150);
+                const hnHost = document.querySelector('.house-number');
+                const input = hnHost?.shadowRoot?.querySelector('#id');
+                input?.focus();
+                debug(`📋 Address editor opened (focus on house-number field)`);
+            }
+            else if (tries < 1000) {
+                setTimeout(() => this.openAddressEditor(tries + 1), 200);
+            }
+        }
+        async activatePlacePointTool(address) {
+            const placeButton = this.findPlacePointButton();
+            if (!placeButton) {
+                console.warn(`⚠️ Place Point button not found`);
+                return;
+            }
+            placeButton.click();
+            await this.sleep(200);
+            this.simulateMapClick(address.latitude, address.longitude);
+        }
+        findPlacePointButton() {
+            const selectors = [
+                '[data-testid="add-place"]',
+                '.add-place',
+                'wz-button:has(.w-icon-place)',
+                '[aria-label*="place" i]',
+                '[title*="place" i]'
+            ];
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                if (el && this.isVisible(el))
+                    return el;
+            }
+            return null;
+        }
+        simulateMapClick(lat, lon) {
             if (!this.wmeSDK)
                 return;
-            this.wmeSDK.Map.redrawLayer({ layerName: this.layerName });
+            try {
+                const unsafeWindow = window.unsafeWindow || window;
+                if (!unsafeWindow.W?.map?.getPixelFromLonLat) {
+                    console.warn(`⚠️ WME map API not available for pixel conversion`);
+                    return;
+                }
+                const geo = new unsafeWindow.OpenLayers.LonLat(lon, lat);
+                const pixel = unsafeWindow.W.map.getPixelFromLonLat(geo);
+                if (!pixel)
+                    return;
+                const mapContainer = document.querySelector('.olMapViewport') ||
+                    document.querySelector('#map') ||
+                    document.querySelector('.wme-map-container');
+                if (!mapContainer)
+                    return;
+                const rect = mapContainer.getBoundingClientRect();
+                const clientX = rect.left + pixel.x;
+                const clientY = rect.top + pixel.y;
+                const clickEvent = new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    clientX,
+                    clientY,
+                    button: 0
+                });
+                mapContainer.dispatchEvent(clickEvent);
+                debug(`🖱️ Simulated click at pixel: ${pixel.x}, ${pixel.y}`);
+            }
+            catch (error) {
+                console.error(`❌ Error simulating map click:`, error);
+            }
+        }
+        async fillPlacePointData(address) {
+            await this.sleep(500);
+            try {
+                const editorPanel = this.findPlacePointEditor();
+                if (!editorPanel) {
+                    console.warn(`⚠️ Place Point editor not found`);
+                    return;
+                }
+                this.fillAddressFields(editorPanel, address);
+                console.log(`📝 Filled place point data: ${address.streetName} ${address.houseNumber}, ${address.city}`);
+            }
+            catch (error) {
+                console.error(`❌ Error filling place point data:`, error);
+            }
+        }
+        findPlacePointEditor() {
+            const selectors = [
+                'div.place-point.is-active',
+                '#edit-panel',
+                '[data-testid="edit-panel"]',
+                '.place-editor',
+                '.venue-editor'
+            ];
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                if (el && this.isVisible(el))
+                    return el;
+            }
+            return null;
+        }
+        fillAddressFields(editorPanel, address) {
+            const streetInput = editorPanel.querySelector('input[name="street"]') ||
+                editorPanel.querySelector('[data-testid="street-input"]') ||
+                editorPanel.querySelector('input[placeholder*="street" i]');
+            if (streetInput && streetInput instanceof HTMLInputElement) {
+                this.setInputValue(streetInput, address.streetName);
+            }
+            const houseNumberInput = editorPanel.querySelector('input[name="houseNumber"]') ||
+                editorPanel.querySelector('[data-testid="house-number-input"]') ||
+                editorPanel.querySelector('input[placeholder*="number" i]');
+            if (houseNumberInput && houseNumberInput instanceof HTMLInputElement) {
+                this.setInputValue(houseNumberInput, address.houseNumber);
+            }
+            const cityInput = editorPanel.querySelector('input[name="city"]') ||
+                editorPanel.querySelector('[data-testid="city-input"]') ||
+                editorPanel.querySelector('input[placeholder*="city" i]');
+            if (cityInput && cityInput instanceof HTMLInputElement) {
+                this.setInputValue(cityInput, address.city);
+            }
+            console.log(`📝 Filled address fields: ${address.streetName}, ${address.houseNumber}, ${address.city}`);
+        }
+        setInputValue(input, value) {
+            const win = input.ownerDocument.defaultView || window;
+            const desc = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, 'value');
+            const nativeSetter = desc && desc.set;
+            if (nativeSetter) {
+                nativeSetter.call(input, value);
+                input.dispatchEvent(new win.Event('input', { bubbles: true }));
+                input.dispatchEvent(new win.Event('change', { bubbles: true }));
+            }
+            else {
+                input.value = value;
+            }
+            input.focus();
+            input.blur();
+        }
+        isVisible(el) {
+            if (!el || !el.getBoundingClientRect)
+                return false;
+            const r = el.getBoundingClientRect();
+            return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+        }
+        sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
         }
         clearMarkers() {
             if (!this.wmeSDK || !this.isLayerCreated)
@@ -426,8 +948,10 @@
             this.setLayerVisibility(false);
             console.log("🗑️  All markers cleared");
         }
-        getMarkerCount() {
-            return 0;
+        redrawLayer() {
+            if (!this.wmeSDK)
+                return;
+            this.wmeSDK.Map.redrawLayer({ layerName: this.layerName });
         }
     }
     const mapRenderer = new MapRenderer();
@@ -465,12 +989,9 @@
             }
             this.selectedSegments = selection.ids.map((segmentId) => this.wmeSDK.DataModel.Segments.getById({ segmentId })).filter(x => x);
             this.selectedStreetNames = this.extractStreetNames(this.selectedSegments);
-            console.log(`📌 Selected segments: ${this.selectedSegments.length}, streets:`, this.selectedStreetNames);
+            debug(`📌 Selected segments: ${this.selectedSegments.length}, streets:`, this.selectedStreetNames);
             appState.setSelectedSegments(this.selectedSegments);
             await this.fetchSelectedHouseNumbers();
-            if (appState.getImportState().isActive && this.selectedSegments.length > 0) {
-                await this.loadAddressesForSegments();
-            }
         }
         extractStreetNames(segments) {
             if (!this.wmeSDK)
@@ -510,7 +1031,7 @@
                 this.selectedHouseNumbers = await this.wmeSDK.DataModel.HouseNumbers.fetchHouseNumbers({
                     segmentIds
                 });
-                console.log(`📍 Loaded ${this.selectedHouseNumbers.length} existing house numbers for selected segments`);
+                debug(`📍 Loaded ${this.selectedHouseNumbers.length} existing house numbers for selected segments`);
             }
             catch (error) {
                 console.error("❌ Error fetching selected house numbers:", error);
@@ -541,9 +1062,9 @@
             let north = -90, south = 90, east = -180, west = 180;
             this.selectedSegments.forEach(segment => {
                 if (segment.geometry && segment.geometry.coordinates) {
-                    console.log("🔍 Segment geometry:", segment.geometry);
+                    debug("🔍 Segment geometry:", segment.geometry);
                     segment.geometry.coordinates.forEach((coord) => {
-                        console.log("🔍 Raw coordinate:", coord);
+                        debug("🔍 Raw coordinate:", coord);
                         const [x, y] = coord;
                         if (x >= -180 && x <= 180 && y >= -90 && y <= 90) {
                             north = Math.max(north, y);
@@ -554,7 +1075,7 @@
                         else {
                             const lat = (y / 6378137) * (180 / Math.PI);
                             const lon = (x / 6378137) * (180 / Math.PI);
-                            console.log("🔍 Converted lat/lon:", lat, lon);
+                            debug("🔍 Converted lat/lon:", lat, lon);
                             north = Math.max(north, lat);
                             south = Math.min(south, lat);
                             east = Math.max(east, lon);
@@ -563,7 +1084,7 @@
                     });
                 }
             });
-            console.log("🔍 Calculated bounds:", { north, south, east, west });
+            debug("🔍 Calculated bounds:", { north, south, east, west });
             const padding = 0.005;
             return {
                 north: north + padding,
@@ -573,12 +1094,29 @@
             };
         }
         filterAndColorAddresses(addresses) {
+            const existingRpps = new Set();
+            try {
+                const venues = this.wmeSDK.DataModel.Venues.getAll();
+                for (const venue of venues) {
+                    try {
+                        const va = this.wmeSDK.DataModel.Venues.getAddress({ venueId: venue.id });
+                        if (va?.street?.name && va?.houseNumber) {
+                            existingRpps.add(`${va.street.name.trim().toLowerCase()}|${va.houseNumber.trim().toLowerCase()}`);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch (e) {
+                console.warn('⚠️ Could not read existing venues for duplicate check:', e);
+            }
             return addresses.map(address => {
                 const streetMatch = this.selectedStreetNames.some(selectedStreet => this.normalizeStreetName(address.streetName).includes(this.normalizeStreetName(selectedStreet)) ||
                     this.normalizeStreetName(selectedStreet).includes(this.normalizeStreetName(address.streetName)));
                 let status = 'gray';
                 if (streetMatch) {
-                    status = this.addressHasExistingHouseNumber(address) ? 'lightGreen' : 'green';
+                    const key = `${address.streetName.trim().toLowerCase()}|${address.houseNumber.trim().toLowerCase()}`;
+                    status = existingRpps.has(key) ? 'lightGreen' : 'green';
                 }
                 else {
                     const similarMatch = this.selectedStreetNames.some(selectedStreet => this.calculateStreetSimilarity(address.streetName, selectedStreet) > 0.8);
@@ -586,10 +1124,7 @@
                         status = 'lightGreen';
                     }
                 }
-                return {
-                    ...address,
-                    status
-                };
+                return { ...address, status };
             });
         }
         addressHasExistingHouseNumber(address) {
@@ -642,11 +1177,17 @@
             }
             return matrix[str2.length][str1.length];
         }
+        async loadAddressesForSelectedSegments() {
+            await this.loadAddressesForSegments();
+        }
         async loadAddressesManually() {
             await this.loadAddressesForSegments();
         }
         getSelectedSegments() {
             return this.selectedSegments;
+        }
+        hasSelectedSegments() {
+            return this.selectedSegments.length > 0;
         }
         getSelectedStreetNames() {
             return this.selectedStreetNames;
@@ -676,22 +1217,27 @@
         <div style="padding: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
             <h3 style="margin: 0 0 10px 0; font-size: 16px;">Quick PP Importer</h3>
             
-            <div style="margin-bottom: 12px;">
+            <div style="margin-bottom: 8px;">
                 <input type="checkbox" id="qpi-enable" style="cursor: pointer;">
-                <label for="qpi-enable" style="cursor: pointer; margin-left: 5px;">Enable Import Mode</label>
+                <label for="qpi-enable" style="cursor: pointer; margin-left: 5px;">Import Mode aktivieren</label>
             </div>
             
             <div style="background: #f0f0f0; padding: 8px; border-radius: 4px; font-size: 12px; line-height: 1.4;">
                 <p style="margin: 0; font-weight: bold;">Anleitung:</p>
                 <p style="margin: 5px 0 0 0;">1. Straße(n) selektieren</p>
-                <p style="margin: 5px 0 0 0;">2. <strong>P</strong> drücken → Adressen laden</p>
-                <p style="margin: 5px 0 0 0;">3. Klick → RPP erstellen</p>
-                <p style="margin: 5px 0 0 0;"><strong>O</strong> = Fortsetzen | <strong>Esc</strong> = Pause</p>
+                <p style="margin: 5px 0 0 0;">2. <strong>P</strong> → Adressen laden + Import starten</p>
+                <p style="margin: 5px 0 0 0;">3. Auf Marker klicken → RPP erstellen</p>
+                <p style="margin: 5px 0 0 0;"><strong>Esc</strong> = Pausieren &nbsp;|&nbsp; <strong>O</strong> = Fortsetzen &nbsp;|&nbsp; <strong>P</strong> = Stoppen</p>
             </div>
             
             <div style="margin-top: 10px; font-size: 11px; color: #666;">
                 <p style="margin: 0;" id="qpi-status">Status: Bereit</p>
                 <p style="margin: 5px 0 0 0;" id="qpi-address-count">Adressen geladen: 0</p>
+            </div>
+
+            <div style="margin-top: 10px; border-top: 1px solid #ddd; padding-top: 8px;">
+                <input type="checkbox" id="qpi-debug" style="cursor: pointer;">
+                <label for="qpi-debug" style="cursor: pointer; margin-left: 5px; font-size: 11px; color: #888;">Debug-Ausgaben in Console</label>
             </div>
         </div>
     `;
@@ -707,6 +1253,12 @@
                 }
             });
         }
+        const debugCheckbox = tabPane.querySelector("#qpi-debug");
+        if (debugCheckbox) {
+            debugCheckbox.addEventListener("change", (e) => {
+                appState.setDebugMode(e.target.checked);
+            });
+        }
         appState.on("addressesLoaded", (addresses) => {
             const countEl = tabPane.querySelector("#qpi-address-count");
             if (countEl) {
@@ -717,42 +1269,93 @@
             const statusEl = tabPane.querySelector("#qpi-status");
             if (statusEl)
                 statusEl.textContent = "Status: 🟢 Aktiv";
+            const cb = tabPane.querySelector("#qpi-enable");
+            if (cb)
+                cb.checked = true;
         });
         appState.on("importDeactivated", () => {
             const statusEl = tabPane.querySelector("#qpi-status");
             if (statusEl)
                 statusEl.textContent = "Status: Bereit";
+            const cb = tabPane.querySelector("#qpi-enable");
+            if (cb)
+                cb.checked = false;
+        });
+        appState.on("importPaused", () => {
+            const statusEl = tabPane.querySelector("#qpi-status");
+            if (statusEl)
+                statusEl.textContent = "Status: ⏸️ Pausiert (O = Fortsetzen)";
+        });
+        appState.on("importResumed", () => {
+            const statusEl = tabPane.querySelector("#qpi-status");
+            if (statusEl)
+                statusEl.textContent = "Status: 🟢 Aktiv";
         });
     }
     function setupMapLayer(wmeSDK) {
         console.log("✅ Map layer setup delegated to mapRenderer");
     }
+    function setMapCursor(wmeSDK, cursor) {
+        try {
+            const viewport = wmeSDK.Map.getMapViewportElement();
+            viewport.style.cursor = cursor;
+        }
+        catch (e) {
+            const viewport = document.querySelector('.olMapViewport');
+            if (viewport)
+                viewport.style.cursor = cursor;
+        }
+    }
     function setupEventListeners(wmeSDK) {
-        document.addEventListener("keydown", (e) => {
-            const state = appState.getImportState();
-            if (e.key.toLowerCase() === "p" && !state.isPaused) {
-                e.preventDefault();
-                if (!state.isActive) {
-                    console.log("▶️  Import Mode: ON");
-                    appState.activateImport();
-                }
-                else {
-                    console.log("⏹️  Import Mode: OFF");
+        wmeSDK.Shortcuts.createShortcut({
+            shortcutId: 'qpi-toggle',
+            description: 'Import starten (Segment auswählen, dann P drücken) / Stoppen',
+            shortcutKeys: 'P',
+            callback: async () => {
+                const state = appState.getImportState();
+                if (state.isActive) {
+                    debug("⏹️  Import Mode: OFF");
                     appState.deactivateImport();
+                    return;
                 }
-            }
-            if (e.key.toLowerCase() === "o" && state.isActive) {
-                e.preventDefault();
-                console.log("▶️  Continuing...");
-                appState.togglePause();
-            }
-            if (e.key === "Escape" && state.isActive && !state.isPaused) {
-                e.preventDefault();
-                console.log("⏸️  Paused");
-                appState.togglePause();
+                if (!segmentSelector.hasSelectedSegments()) {
+                    console.warn("⚠️  P gedrückt aber kein Segment ausgewählt — bitte zuerst Straße(n) selektieren");
+                    return;
+                }
+                debug("▶️  Import Mode: ON — Lade Adressen...");
+                appState.activateImport();
+                await segmentSelector.loadAddressesForSelectedSegments();
             }
         });
-        console.log("✅ Event listeners registered");
+        wmeSDK.Shortcuts.createShortcut({
+            shortcutId: 'qpi-resume',
+            description: 'Import fortsetzen (nach Pause)',
+            shortcutKeys: wmeSDK.Shortcuts.areShortcutKeysInUse({ shortcutKeys: 'O' }) ? null : 'O',
+            callback: () => {
+                const state = appState.getImportState();
+                if (state.isActive && state.isPaused) {
+                    debug("▶️  Fortgesetzt");
+                    appState.togglePause();
+                    setMapCursor(wmeSDK, 'crosshair');
+                }
+            }
+        });
+        appState.on('importActivated', () => setMapCursor(wmeSDK, 'crosshair'));
+        appState.on('importDeactivated', () => setMapCursor(wmeSDK, ''));
+        appState.on('importPaused', () => setMapCursor(wmeSDK, ''));
+        appState.on('importResumed', () => setMapCursor(wmeSDK, 'crosshair'));
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape')
+                return;
+            const state = appState.getImportState();
+            if (!state.isActive)
+                return;
+            if (state.isPaused)
+                return;
+            debug("⏸️  Import Mode: PAUSIERT (Esc) — O zum Fortsetzen");
+            appState.togglePause();
+        });
+        console.log("✅ SDK Shortcuts registered");
     }
 
     const initSDK = async () => {
@@ -803,7 +1406,8 @@
             appState.on("segmentsSelected", (segments) => {
                 console.log("📌 Segments selected:", segments.length);
             });
-            window.testQuickPP = {
+            const pageWindow = window.unsafeWindow || window;
+            pageWindow.testQuickPP = {
                 testAPI: async () => {
                     console.log("🧪 Testing API (real kbox.at call)...");
                     try {
@@ -819,50 +1423,10 @@
                         throw error;
                     }
                 },
-                testRender: async () => {
-                    console.log("🧪 Testing Rendering with Mock Data...");
-                    const addresses = generateMockAddresses(10);
-                    addresses.forEach((addr, i) => {
-                        if (i % 3 === 0)
-                            addr.status = "green";
-                        else if (i % 3 === 1)
-                            addr.status = "lightGreen";
-                        else
-                            addr.status = "gray";
-                    });
-                    await mapRenderer.renderAddresses(addresses);
-                    appState.setAddresses(addresses);
-                    console.log("✅ Rendering Test Complete - Check map!");
-                },
-                testAPIWithMock: async () => {
-                    console.log("🧪 Testing API with Mock Fallback...");
-                    try {
-                        const mapExtent = wmeSDK.Map.getMapExtent();
-                        const [left, bottom, right, top] = mapExtent;
-                        console.log(`📍 Using map extent: [${mapExtent}]`);
-                        let addresses = await addressDataClient.fetchAddressesByBoundingBox(left, bottom, right, top);
-                        if (addresses.length === 0) {
-                            console.log("⚠️  API failed, using mock data");
-                            addresses = generateMockAddresses(10);
-                        }
-                        addresses.forEach((addr, i) => {
-                            if (i % 3 === 0)
-                                addr.status = "green";
-                            else if (i % 3 === 1)
-                                addr.status = "lightGreen";
-                        });
-                        await mapRenderer.renderAddresses(addresses);
-                        appState.setAddresses(addresses);
-                        console.log("✅ Test Complete!");
-                    }
-                    catch (error) {
-                        console.error("❌ Test API with Mock failed:", error);
-                    }
-                },
                 showState: () => appState.logState(),
-                clear: () => {
-                    mapRenderer.clearMarkers();
-                    appState.deactivateImport();
+                clearCache: () => {
+                    clearAddressCache();
+                    console.log("🗑️ Address cache cleared");
                 },
                 updatePositions: () => {
                     mapRenderer.redrawLayer();
@@ -878,24 +1442,8 @@
                     await segmentSelector.loadAddressesManually();
                     console.log("✅ Address loading triggered");
                 },
-                showSegments: () => {
-                    const segments = segmentSelector.getSelectedSegments();
-                    const streets = segmentSelector.getSelectedStreetNames();
-                    console.log(`📌 Selected segments: ${segments.length}`);
-                    console.log(`🛣️  Selected streets:`, streets);
-                    return { segments: segments.length, streets };
-                }
             };
-            console.log("💡 Debug Commands available:");
-            console.log("  testQuickPP.testAPI() - Test real API");
-            console.log("  testQuickPP.testRender() - Test rendering with mock data");
-            console.log("  testQuickPP.testAPIWithMock() - Test API with mock fallback");
-            console.log("  testQuickPP.showState() - Show current state");
-            console.log("  testQuickPP.clear() - Clear markers");
-            console.log("  testQuickPP.updatePositions() - Redraw layer");
-            console.log("  testQuickPP.countMarkers() - Count markers");
-            console.log("  testQuickPP.loadAddresses() - Load addresses for selected segments");
-            console.log("  testQuickPP.showSegments() - Show selected segments info");
+            console.log("💡 Debug Commands: testQuickPP.testAPI() | .showState() | .clearCache() | .updatePositions() | .countMarkers() | .loadAddresses()");
         }
         catch (error) {
             console.error("❌ Script initialization failed:", error);

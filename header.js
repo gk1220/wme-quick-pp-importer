@@ -14,4 +14,5 @@
 // @exclude     https://beta.waze.com/user/editor*
 // @connect     wms.kbox.at
 // @grant       GM_xmlhttpRequest
+// @grant       unsafeWindow
 // ==/UserScript==

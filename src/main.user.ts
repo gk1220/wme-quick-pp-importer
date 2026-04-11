@@ -1,6 +1,6 @@
 import { WmeSDK } from "wme-sdk-typings";
 import { initializeScript, appState } from "./core/initialization";
-import { addressDataClient, generateMockAddresses } from "./data/api";
+import { addressDataClient, clearAddressCache } from "./data/api";
 import { mapRenderer } from "./map/renderer";
 import { segmentSelector } from "./logic/segment-selector";
 
@@ -84,16 +84,15 @@ initSDK().then(async (wmeSDK: WmeSDK) => {
         // --- DEMO: Test die Funktionalität ---
         // Entferne dies später oder wrap in Development Condition
 
-        (window as any).testQuickPP = {
-            // Test API (real)
+        const pageWindow = (window as any).unsafeWindow || window;
+        pageWindow.testQuickPP = {
+            // Test API (real kbox.at call)
             testAPI: async () => {
                 console.log("🧪 Testing API (real kbox.at call)...");
                 try {
-                    // Verwende aktuelle Map-Extent für den Test
                     const mapExtent = wmeSDK.Map.getMapExtent();
                     const [left, bottom, right, top] = mapExtent;
                     console.log(`📍 Using map extent: [${mapExtent}]`);
-
                     const addresses = await addressDataClient.fetchAddressesByBoundingBox(
                         left, bottom, right, top
                     );
@@ -105,104 +104,32 @@ initSDK().then(async (wmeSDK: WmeSDK) => {
                 }
             },
 
-            // Test Rendering mit Mock-Daten
-            testRender: async () => {
-                console.log("🧪 Testing Rendering with Mock Data...");
-                const addresses = generateMockAddresses(10);
-
-                // Status setzen für Farbcodierung
-                addresses.forEach((addr: any, i: number) => {
-                    if (i % 3 === 0) addr.status = "green";
-                    else if (i % 3 === 1) addr.status = "lightGreen";
-                    else addr.status = "gray";
-                });
-
-                await mapRenderer.renderAddresses(addresses);
-                appState.setAddresses(addresses);
-                console.log("✅ Rendering Test Complete - Check map!");
-            },
-
-            // Test API mit Mock-Fallback
-            testAPIWithMock: async () => {
-                console.log("🧪 Testing API with Mock Fallback...");
-                try {
-                    // Verwende aktuelle Map-Extent für den Test
-                    const mapExtent = wmeSDK.Map.getMapExtent();
-                    const [left, bottom, right, top] = mapExtent;
-                    console.log(`📍 Using map extent: [${mapExtent}]`);
-
-                    let addresses = await addressDataClient.fetchAddressesByBoundingBox(
-                        left, bottom, right, top
-                    );
-
-                    // Wenn API fehlschlägt, Mock verwenden
-                    if (addresses.length === 0) {
-                        console.log("⚠️  API failed, using mock data");
-                        addresses = generateMockAddresses(10);
-                    }
-
-                    addresses.forEach((addr: any, i: number) => {
-                        if (i % 3 === 0) addr.status = "green";
-                        else if (i % 3 === 1) addr.status = "lightGreen";
-                    });
-
-                    await mapRenderer.renderAddresses(addresses);
-                    appState.setAddresses(addresses);
-                    console.log("✅ Test Complete!");
-                } catch (error) {
-                    console.error("❌ Test API with Mock failed:", error);
-                }
-            },
-
-            // State anzeigen
             showState: () => appState.logState(),
 
-            // Alles löschen
-            clear: () => {
-                mapRenderer.clearMarkers();
-                appState.deactivateImport();
+            clearCache: () => {
+                clearAddressCache();
+                console.log("🗑️ Address cache cleared");
             },
 
-            // Layer neu zeichnen (für Position-Updates nach Map-Move/Zoom)
             updatePositions: () => {
                 mapRenderer.redrawLayer();
                 console.log("🔄 Layer redrawn");
             },
 
-            // Anzahl der Marker zählen
             countMarkers: () => {
                 const count = appState.getAddresses().length;
                 console.log(`📊 Current markers: ${count}`);
                 return count;
             },
 
-            // Adressen für ausgewählte Segmente laden (manuell triggern)
             loadAddresses: async () => {
                 console.log("🔍 Loading addresses for selected segments...");
                 await segmentSelector.loadAddressesManually();
                 console.log("✅ Address loading triggered");
             },
-
-            // Segment-Info anzeigen
-            showSegments: () => {
-                const segments = segmentSelector.getSelectedSegments();
-                const streets = segmentSelector.getSelectedStreetNames();
-                console.log(`📌 Selected segments: ${segments.length}`);
-                console.log(`🛣️  Selected streets:`, streets);
-                return { segments: segments.length, streets };
-            }
         };
 
-        console.log("💡 Debug Commands available:");
-        console.log("  testQuickPP.testAPI() - Test real API");
-        console.log("  testQuickPP.testRender() - Test rendering with mock data");
-        console.log("  testQuickPP.testAPIWithMock() - Test API with mock fallback");
-        console.log("  testQuickPP.showState() - Show current state");
-        console.log("  testQuickPP.clear() - Clear markers");
-        console.log("  testQuickPP.updatePositions() - Redraw layer");
-        console.log("  testQuickPP.countMarkers() - Count markers");
-        console.log("  testQuickPP.loadAddresses() - Load addresses for selected segments");
-        console.log("  testQuickPP.showSegments() - Show selected segments info");
+        console.log("💡 Debug Commands: testQuickPP.testAPI() | .showState() | .clearCache() | .updatePositions() | .countMarkers() | .loadAddresses()");
 
     } catch (error) {
         console.error("❌ Script initialization failed:", error);

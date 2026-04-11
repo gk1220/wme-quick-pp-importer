@@ -14,6 +14,7 @@
 // @exclude     https://beta.waze.com/user/editor*
 // @connect     wms.kbox.at
 // @grant       GM_xmlhttpRequest
+// @grant       unsafeWindow
 
 // @require       file:///home/gerhard.kronstorfer/Waze/WME_scripts/wme-quick-pp-importer/.out/main.user.js
 // ==/UserScript==

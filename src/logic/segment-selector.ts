@@ -1,5 +1,5 @@
 import { WmeSDK, HouseNumber } from "wme-sdk-typings";
-import { appState } from "../core/state";
+import { appState, debug } from "../core/state";
 import { addressDataClient } from "../data/api";
 import { mapRenderer } from "../map/renderer";
 import { calculateDistance } from "../utils/geo";
@@ -60,15 +60,13 @@ export class SegmentSelector {
         // Straßen-Namen extrahieren
         this.selectedStreetNames = this.extractStreetNames(this.selectedSegments);
 
-        console.log(`📌 Selected segments: ${this.selectedSegments.length}, streets:`, this.selectedStreetNames);
+        debug(`📌 Selected segments: ${this.selectedSegments.length}, streets:`, this.selectedStreetNames);
 
         appState.setSelectedSegments(this.selectedSegments);
         await this.fetchSelectedHouseNumbers();
 
-        // Automatisch Adressen laden wenn Segmente ausgewählt
-        if (appState.getImportState().isActive && this.selectedSegments.length > 0) {
-            await this.loadAddressesForSegments();
-        }
+        // Addresses are NOT loaded automatically on segment selection.
+        // The user triggers loading by pressing P (old-script workflow).
     }
 
     /**
@@ -123,7 +121,7 @@ export class SegmentSelector {
             this.selectedHouseNumbers = await this.wmeSDK.DataModel.HouseNumbers.fetchHouseNumbers({
                 segmentIds
             });
-            console.log(`📍 Loaded ${this.selectedHouseNumbers.length} existing house numbers for selected segments`);
+            debug(`📍 Loaded ${this.selectedHouseNumbers.length} existing house numbers for selected segments`);
         } catch (error) {
             console.error("❌ Error fetching selected house numbers:", error);
             this.selectedHouseNumbers = [];
@@ -176,23 +174,20 @@ export class SegmentSelector {
 
         this.selectedSegments.forEach(segment => {
             if (segment.geometry && segment.geometry.coordinates) {
-                console.log("🔍 Segment geometry:", segment.geometry);
+                debug("🔍 Segment geometry:", segment.geometry);
                 segment.geometry.coordinates.forEach((coord: [number, number]) => {
-                    console.log("🔍 Raw coordinate:", coord);
+                    debug("🔍 Raw coordinate:", coord);
                     const [x, y] = coord;
 
-                    // Check if coordinates are already in lat/lng range
                     if (x >= -180 && x <= 180 && y >= -90 && y <= 90) {
-                        // Already lat/lng
                         north = Math.max(north, y);
                         south = Math.min(south, y);
                         east = Math.max(east, x);
                         west = Math.min(west, x);
                     } else {
-                        // Convert from Web Mercator (EPSG:3857) to lat/lng
                         const lat = (y / 6378137) * (180 / Math.PI);
                         const lon = (x / 6378137) * (180 / Math.PI);
-                        console.log("🔍 Converted lat/lon:", lat, lon);
+                        debug("🔍 Converted lat/lon:", lat, lon);
 
                         north = Math.max(north, lat);
                         south = Math.min(south, lat);
@@ -203,7 +198,7 @@ export class SegmentSelector {
             }
         });
 
-        console.log("🔍 Calculated bounds:", { north, south, east, west });
+        debug("🔍 Calculated bounds:", { north, south, east, west });
 
         // Padding hinzufügen (500m ≈ 0.0045° bei 48° Breite)
         const padding = 0.005; // ~500m
@@ -217,8 +212,31 @@ export class SegmentSelector {
 
     /**
      * Adressen filtern und Farben zuweisen basierend auf Straßennamen-Match
+     * und bereits vorhandenen Venues (RPPs) in WME.
+     *
+     * green     = passende Straße, noch kein RPP → anlegen
+     * lightGreen = passende Straße, RPP bereits vorhanden → überspringen
+     * gray       = andere Straße
      */
     private filterAndColorAddresses(addresses: any[]): any[] {
+        // Build a set of 'streetName|houseNumber' keys for all existing RESIDENTIAL venues.
+        const existingRpps = new Set<string>();
+        try {
+            const venues = this.wmeSDK!.DataModel.Venues.getAll();
+            for (const venue of venues) {
+                try {
+                    const va = this.wmeSDK!.DataModel.Venues.getAddress({ venueId: venue.id });
+                    if (va?.street?.name && va?.houseNumber) {
+                        existingRpps.add(
+                            `${va.street.name.trim().toLowerCase()}|${va.houseNumber.trim().toLowerCase()}`
+                        );
+                    }
+                } catch { /* venue may be unsaved / incomplete */ }
+            }
+        } catch (e) {
+            console.warn('⚠️ Could not read existing venues for duplicate check:', e);
+        }
+
         return addresses.map(address => {
             const streetMatch = this.selectedStreetNames.some(selectedStreet =>
                 this.normalizeStreetName(address.streetName).includes(this.normalizeStreetName(selectedStreet)) ||
@@ -228,9 +246,9 @@ export class SegmentSelector {
             let status: 'green' | 'lightGreen' | 'gray' = 'gray';
 
             if (streetMatch) {
-                status = this.addressHasExistingHouseNumber(address) ? 'lightGreen' : 'green';
+                const key = `${address.streetName.trim().toLowerCase()}|${address.houseNumber.trim().toLowerCase()}`;
+                status = existingRpps.has(key) ? 'lightGreen' : 'green';
             } else {
-                // Check for similar street names (fuzzy match)
                 const similarMatch = this.selectedStreetNames.some(selectedStreet =>
                     this.calculateStreetSimilarity(address.streetName, selectedStreet) > 0.8
                 );
@@ -239,10 +257,7 @@ export class SegmentSelector {
                 }
             }
 
-            return {
-                ...address,
-                status
-            };
+            return { ...address, status };
         });
     }
 
@@ -324,6 +339,13 @@ export class SegmentSelector {
     }
 
     /**
+     * Adressen für ausgewählte Segmente laden (öffentlich — wird per P-Taste ausgelöst)
+     */
+    async loadAddressesForSelectedSegments(): Promise<void> {
+        await this.loadAddressesForSegments();
+    }
+
+    /**
      * Manuelles Laden von Adressen triggern (für Debug)
      */
     async loadAddressesManually(): Promise<void> {
@@ -335,6 +357,10 @@ export class SegmentSelector {
      */
     getSelectedSegments(): any[] {
         return this.selectedSegments;
+    }
+
+    hasSelectedSegments(): boolean {
+        return this.selectedSegments.length > 0;
     }
 
     getSelectedStreetNames(): string[] {

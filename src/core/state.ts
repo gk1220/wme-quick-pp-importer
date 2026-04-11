@@ -72,6 +72,7 @@ class AppState {
 
     deactivateImport(): void {
         this.importState.isActive = false;
+        this.importState.isPaused = false;
         this.emit("importDeactivated");
         this.clearAddresses();
     }
@@ -79,6 +80,16 @@ class AppState {
     togglePause(): void {
         this.importState.isPaused = !this.importState.isPaused;
         this.emit(this.importState.isPaused ? "importPaused" : "importResumed");
+    }
+
+    // --- Debug Mode ---
+    private _debugMode = false;
+
+    get debugMode(): boolean { return this._debugMode; }
+
+    setDebugMode(val: boolean): void {
+        this._debugMode = val;
+        console.log(`🔧 Debug Mode: ${val ? 'AN' : 'AUS'}`);
     }
 
     getImportState(): Readonly<ImportState> {
@@ -107,6 +118,18 @@ class AppState {
 
     getAddresses(): Address[] {
         return [...this.importState.loadedAddresses];
+    }
+
+    getAddressById(id: string): Address | undefined {
+        return this.importState.loadedAddresses.find(a => a.id === id);
+    }
+
+    markAddressProcessed(id: string): void {
+        const address = this.importState.loadedAddresses.find(a => a.id === id);
+        if (address) {
+            address.status = 'lightGreen';
+            this.emit("addressUpdated", address);
+        }
     }
 
     clearAddresses(): void {
@@ -180,3 +203,10 @@ class AppState {
 
 // Singleton
 export const appState = new AppState();
+
+/**
+ * Debug-Logging Hilfsfunktion — gibt nur aus wenn Debug-Modus aktiv.
+ */
+export function debug(...args: any[]): void {
+    if (appState.debugMode) console.log(...args);
+}
