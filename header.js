@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name        WME Quick PP Importer
-// @namespace   wme-sdk-scripts
-// @version     1.0.0
+// @namespace   https://github.com/gk1220
+// @version     2026.04.11.00
 // @description Quickly add place points based on open address data sources.
 // @author      Gerhard (g1220k)
+// @homepageURL https://github.com/gk1220/wme-quick-pp-importer
+// @supportURL  https://github.com/gk1220/wme-quick-pp-importer/issues
 // @updateURL	https://github.com/gk1220/wme-quick-pp-importer/raw/main/WME_Quick_PP_Importer.user.js
 // @downloadURL https://github.com/gk1220/wme-quick-pp-importer/raw/main/WME_Quick_PP_Importer.user.js
 // @match       https://www.waze.com/editor*
