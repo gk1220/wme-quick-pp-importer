@@ -9,7 +9,7 @@ const LS_KEY = 'WME_PP_LAST_SEEN_VERSION';
 
 /** Changelog: neueste Version zuerst */
 const UPDATE_NOTES: Record<string, string[]> = {
-    '2026.04.11.03': [
+    '2026.04.12.00': [
         'Update-Benachrichtigung im Sidebar-Tab (diese Meldung)',
         'Erstveröffentlichung auf Greasy Fork',
         'Automatische Updates über Greasy Fork',
