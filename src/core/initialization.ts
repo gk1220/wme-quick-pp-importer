@@ -3,6 +3,22 @@ import { appState, debug } from "./state";
 import { segmentSelector } from "../logic/segment-selector";
 import { mapRenderer } from "../map/renderer";
 
+declare const GM_info: { script: { version: string } };
+
+const LS_KEY = 'WME_PP_LAST_SEEN_VERSION';
+
+/** Changelog: neueste Version zuerst */
+const UPDATE_NOTES: Record<string, string[]> = {
+    '2026.04.11.03': [
+        'Update-Benachrichtigung im Sidebar-Tab (diese Meldung)',
+        'Erstveröffentlichung auf Greasy Fork',
+        'Automatische Updates über Greasy Fork',
+        'Tile-basiertes Adress-Caching (750m, 7 Tage TTL)',
+        'Duplikat-Erkennung für bereits vorhandene RPPs',
+        'Fuzzy-Matching für Straßennamen (Levenshtein)',
+    ],
+};
+
 /**
  * Initialisierung des WME SDK und Setup der UI
  */
@@ -17,7 +33,10 @@ export async function initializeScript(wmeSDK: WmeSDK): Promise<void> {
         // 1. Sidebar-Tab erstellen
         await setupSidebarTab(wmeSDK);
 
-        // 2. Map-Layer erstellen
+        // 2. Update-Notification anzeigen (falls neue Version)
+        showUpdateNotification();
+
+        // 3. Map-Layer erstellen
         setupMapLayer(wmeSDK);
 
         // 3. Segment-Selector initialisieren
@@ -42,7 +61,7 @@ async function setupSidebarTab(wmeSDK: WmeSDK): Promise<void> {
     tabLabel.innerText = "🏠 Quick PP";
     
     tabPane.innerHTML = `
-        <div style="padding: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
+        <div id="qpi-sidebar-root" style="padding: 12px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;">
             <h3 style="margin: 0 0 10px 0; font-size: 16px;">Quick PP Importer</h3>
             
             <div style="margin-bottom: 8px;">
@@ -121,6 +140,48 @@ async function setupSidebarTab(wmeSDK: WmeSDK): Promise<void> {
     appState.on("importResumed", () => {
         const statusEl = tabPane.querySelector("#qpi-status");
         if (statusEl) statusEl.textContent = "Status: 🟢 Aktiv";
+    });
+}
+
+/**
+ * Zeigt eine Update-Notification im Sidebar-Tab an,
+ * wenn die aktuelle Version neu ist (noch nicht gesehen).
+ */
+function showUpdateNotification(): void {
+    const currentVersion = GM_info.script.version;
+    const lastSeen = localStorage.getItem(LS_KEY);
+    if (lastSeen === currentVersion) return;
+
+    const notes = UPDATE_NOTES[currentVersion];
+    if (!notes || notes.length === 0) return;
+
+    const tabPane = document.querySelector('#qpi-sidebar-root') as HTMLElement | null;
+    if (!tabPane) return;
+
+    const banner = document.createElement('div');
+    banner.id = 'qpi-update-banner';
+    banner.style.cssText = `
+        background: #e8f4fd; border: 1px solid #90cdf4; border-radius: 6px;
+        padding: 10px 12px; margin-bottom: 10px; font-size: 12px; position: relative;
+    `;
+    banner.innerHTML = `
+        <button id="qpi-update-dismiss" style="
+            position: absolute; top: 6px; right: 8px; background: none; border: none;
+            font-size: 14px; cursor: pointer; color: #555; line-height: 1;
+        " title="Schließen">✕</button>
+        <div style="font-weight: bold; margin-bottom: 6px; color: #1a6fa3;">
+            🎉 Neu in v${currentVersion}
+        </div>
+        <ul style="margin: 0; padding-left: 16px; color: #333;">
+            ${notes.map(n => `<li style="margin-bottom: 3px;">${n}</li>`).join('')}
+        </ul>
+    `;
+
+    tabPane.prepend(banner);
+
+    document.getElementById('qpi-update-dismiss')?.addEventListener('click', () => {
+        banner.remove();
+        localStorage.setItem(LS_KEY, currentVersion);
     });
 }
 
