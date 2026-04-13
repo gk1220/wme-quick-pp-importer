@@ -50,7 +50,7 @@ class MapRenderer {
                             strokeOpacity: 1,
                             strokeWidth: 2,
                             pointRadius: '${radius}',
-                            graphicName: 'square',
+                            graphicName: 'circle',
                             label: '${number}',
                             cursor: '${cursor}',
                             title: '${title}'
@@ -213,7 +213,7 @@ class MapRenderer {
             case "green":
                 return "#4CAF50"; // Grün
             case "lightGreen":
-                return "#AED581"; // Blassgrün
+                return "#ABFA99"; // Blassgrün
             case "gray":
                 return "#BDBDBD"; // Grau
             default:
@@ -288,6 +288,19 @@ class MapRenderer {
             // Create a new residential place (RPP) via SDK
             const newPlaceId = this.wmeSDK.DataModel.Venues.addVenue({ category: 'RESIDENTIAL', geometry }).toString();
             debug(`✅ Created place via SDK: id=${newPlaceId}`);
+
+            const lockInfo = this.getDesiredResidentialLockInfo();
+            if (lockInfo) {
+                try {
+                    this.wmeSDK.DataModel.Venues.updateVenue({
+                        venueId: newPlaceId,
+                        lockRank: lockInfo.lockRank
+                    });
+                    debug(`🔒 Set RPP lock level to L${lockInfo.lockRank + 1} (user rank L${lockInfo.userRank + 1})`);
+                } catch (lockErr) {
+                    console.warn(`⚠️ Failed to set lock level for ${newPlaceId}:`, lockErr);
+                }
+            }
 
             // Set navigation point for RPP (entry/primary)
             try {
@@ -495,6 +508,28 @@ class MapRenderer {
      */
     private sleep(ms: number): Promise<void> {
         return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
+     * Verwendet den aktuellen User-Rank als Lock Level, maximal L4.
+     */
+    private getDesiredResidentialLockInfo(): { userRank: number; lockRank: number } | null {
+        if (!this.wmeSDK) return null;
+
+        const userInfo = this.wmeSDK.State.getUserInfo();
+        const userRank = userInfo?.rank;
+
+        if (typeof userRank !== 'number' || Number.isNaN(userRank)) {
+            return null;
+        }
+
+        // SDK rank is 0-based: rank 0 = L1 … rank 5 = L6.
+        // lockRank 3 = L4 displayed, which is the maximum we want to set.
+        const normalizedUserRank = Math.max(Math.trunc(userRank), 0);
+        return {
+            userRank: normalizedUserRank,
+            lockRank: Math.min(normalizedUserRank, 3)
+        };
     }
 
     /**
