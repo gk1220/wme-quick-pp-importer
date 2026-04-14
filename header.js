@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        WME Quick PP Importer
 // @namespace   https://github.com/gk1220
-// @version     2026.04.13.00
+// @version     2026.04.14.00
 // @description Quickly add place points based on open address data sources.
 // @author      Gerhard (g1220k)
 // @homepageURL https://github.com/gk1220/wme-quick-pp-importer
